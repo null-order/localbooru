@@ -1,0 +1,3 @@
+recursive-include src/localbooru/frontend *
+recursive-include src/localbooru/static *
+recursive-include src/localbooru/templates *

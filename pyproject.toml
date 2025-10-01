@@ -31,3 +31,5 @@ localbooru = "localbooru.cli:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 packages = ["localbooru"]
+include-package-data = true
+package-data = {"localbooru" = ["frontend/index.html", "static/**", "templates/**"]}
