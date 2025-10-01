@@ -15,6 +15,21 @@ from .database import LocalBooruDatabase
 
 LOGGER = logging.getLogger(__name__)
 
+_MODEL_CACHE: Dict[str, "_OpenClipModel"] = {}
+
+
+def get_clip_model(config: LocalBooruConfig) -> "_OpenClipModel":
+    key = config.clip_model_key
+    model = _MODEL_CACHE.get(key)
+    if model is None:
+        model = _OpenClipModel(
+            model_name=config.clip_model_name,
+            checkpoint=config.clip_checkpoint,
+            device=config.clip_device,
+        )
+        _MODEL_CACHE[key] = model
+    return model
+
 
 @dataclass
 class ClipProgress:
@@ -161,11 +176,7 @@ class ClipIndexer(threading.Thread):
 
     def _get_model(self):
         if self._model is None:
-            self._model = _OpenClipModel(
-                model_name=self.config.clip_model_name,
-                checkpoint=self.config.clip_checkpoint,
-                device=self.config.clip_device,
-            )
+            self._model = get_clip_model(self.config)
         return self._model
 
     def _refresh_progress(self) -> None:
@@ -210,6 +221,12 @@ class _OpenClipModel:
             pretrained=checkpoint,
             device=device,
         )
+        self._tokenizer = open_clip.get_tokenizer(model_name)
+        text_projection = getattr(self._model, "text_projection", None)
+        if text_projection is not None and hasattr(text_projection, "shape"):
+            self._feature_dim = int(text_projection.shape[1])
+        else:
+            self._feature_dim = 0
 
     def compute_image_features(self, images: list[Image.Image]) -> np.ndarray:
         import torch
@@ -221,3 +238,22 @@ class _OpenClipModel:
             image_features /= image_features.norm(dim=-1, keepdim=True)
         result = image_features.cpu().numpy().astype(np.float32)
         return result
+
+    def compute_text_features(self, queries: list[str]) -> np.ndarray:
+        import torch
+        import numpy as np
+
+        if not queries:
+            return np.zeros((1, self.feature_dim or 512), dtype=np.float32)
+        tokens = self._tokenizer(queries)
+        tokens = tokens.to(self._device)
+        with torch.no_grad():
+            text_features = self._model.encode_text(tokens)
+            text_features /= text_features.norm(dim=-1, keepdim=True)
+        return text_features.cpu().numpy().astype(np.float32)
+
+    @property
+    def feature_dim(self) -> int:
+        if not self._feature_dim:
+            self._feature_dim = 512
+        return self._feature_dim

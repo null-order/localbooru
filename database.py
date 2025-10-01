@@ -44,6 +44,11 @@ class LocalBooruDatabase:
     def cursor(self) -> sqlite3.Cursor:
         return self._connection.cursor()
 
+    def new_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
     def _ensure_schema(self) -> None:
         with closing(self._connection.cursor()) as cur:
             for stmt in SCHEMA_STATEMENTS:
