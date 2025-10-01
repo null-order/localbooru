@@ -472,10 +472,12 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def file_url_for(self, image_id: int, path: str) -> str:
-        return f"/files/{image_id}"
+        digest = hashlib.sha1(path.encode('utf-8')).hexdigest()
+        return f"/files/{image_id}?v={digest[:10]}"
 
     def thumb_url_for(self, image_id: int, path: str) -> str:
-        return f"/thumbs/{image_id}"
+        digest = hashlib.sha1(path.encode('utf-8')).hexdigest()
+        return f"/thumbs/{image_id}?v={digest[:10]}"
 
 
 class LocalBooruHTTPServer(ThreadingHTTPServer):
