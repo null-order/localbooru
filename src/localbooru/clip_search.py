@@ -121,6 +121,8 @@ def perform_clip_search(
 
     matrix_np = np.stack(matrix)
     scores = matrix_np @ combination
-    top_indices = np.argsort(scores)[::-1][:limit]
-    results = [(image_ids[i], float(scores[i])) for i in top_indices]
+    order = np.argsort(scores)[::-1]
+    if limit and limit > 0:
+        order = order[:limit]
+    results = [(image_ids[i], float(scores[i])) for i in order]
     return results

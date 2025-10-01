@@ -24,7 +24,9 @@ main { position: relative; display: flex; padding: 22px 24px 64px; gap: 24px; }
 .card:hover { transform: translateY(-4px); border-color: rgba(98,214,255,0.5); box-shadow: 0 12px 24px rgba(0,0,0,0.35); }
 .card .image-wrap { background: #10131c; display: flex; align-items: center; justify-content: center; aspect-ratio: 2 / 3; overflow: hidden; flex: 1 1 auto; min-height: 0; }
 .card .image-wrap img { width: 100%; height: 100%; max-width: 100%; max-height: 100%; object-fit: contain; object-position: center; display: block; }
-.card .info { padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.card .info { padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.card .info-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.card .info-row .meta { flex: 1; }
 .meta { font-size: 12px; opacity: 0.65; display: flex; gap: 10px; flex-wrap: wrap; }
 .description { font-size: 12px; line-height: 1.4; opacity: 0.75; }
 #status { font-size: 13px; margin-left: 8px; opacity: 0.7; }
@@ -47,8 +49,8 @@ button:hover { background: rgba(255,255,255,0.16); box-shadow: 0 6px 16px rgba(0
 .clip-search button.secondary { background: transparent; border-color: rgba(255,255,255,0.2); }
 .clip-search button.secondary:hover { background: rgba(255,255,255,0.08); }
 .clip-score { font-size: 12px; color: #7dd3fc; letter-spacing: 0.02em; }
-.similar-btn { margin-top: 6px; align-self: flex-start; font-size: 12px; padding: 6px 10px; border-radius: 999px; background: rgba(34,211,238,0.18); color: #67e8f9; border: 1px solid rgba(34,211,238,0.4); cursor: pointer; }
-.similar-btn:hover { background: rgba(34,211,238,0.28); box-shadow: 0 6px 14px rgba(14,116,144,0.35); }
+.similar-icon { width: 30px; height: 30px; border-radius: 50%; border: 1px solid rgba(34,211,238,0.4); background: rgba(34,211,238,0.15); color: #67e8f9; display: inline-flex; align-items: center; justify-content: center; font-size: 16px; line-height: 1; cursor: pointer; transition: background 0.15s ease, box-shadow 0.15s ease; }
+.similar-icon:hover { background: rgba(34,211,238,0.25); box-shadow: 0 6px 14px rgba(14,116,144,0.35); }
 .ghost-btn { background: transparent; border: 1px solid rgba(255,255,255,0.3); color: inherit; padding: 6px 12px; border-radius: 999px; cursor: pointer; }
 .ghost-btn:hover { background: rgba(255,255,255,0.12); }
 .detail-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -81,11 +83,12 @@ button:hover { background: rgba(255,255,255,0.16); box-shadow: 0 6px 16px rgba(0
 .hotspot-dot { position: absolute; width: 22px; height: 22px; border-radius: 50%; background: radial-gradient(circle at center, rgba(255,255,255,0.95) 0%, rgba(90,240,255,0.85) 45%, rgba(0,110,148,0.85) 70%, rgba(0,0,0,0.35) 100%); outline: 2px solid rgba(0,0,0,0.35); outline-offset: 4px; transform: translate(-50%, -50%); box-shadow: 0 0 24px rgba(90,240,255,0.75); opacity: 0; transition: opacity 0.18s ease; }
 .hotspot-dot::after { content: ''; position: absolute; inset: -11px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.45); }
 .hotspot-dot.visible { opacity: 1; animation: hotspotPulse 1.5s ease-in-out infinite; }
-.detail-meta { width: clamp(320px, 24vw, 380px); flex-shrink: 0; display: flex; flex-direction: column; gap: 18px; max-height: 100%; overflow-y: auto; padding-right: 6px; }
+.detail-meta { width: clamp(320px, 32vw, 420px); flex-shrink: 0; display: flex; flex-direction: column; gap: 18px; max-height: 100%; overflow-y: auto; padding-right: 6px; }
 .detail-meta::-webkit-scrollbar { width: 6px; }
 .detail-meta::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 999px; }
 .detail-info { display: flex; flex-wrap: wrap; gap: 10px; }
 .detail-section { background: rgba(255,255,255,0.03); border-radius: 12px; padding: 12px 14px; border: 1px solid rgba(255,255,255,0.06); }
+.detail-section { width: 100%; }
 .detail-section.prompts { background: rgba(255,255,255,0.04); }
 .detail-section.prompts .prompt-buttons { justify-content: flex-start; }
 .detail-section.info { background: rgba(255,255,255,0.05); }
@@ -97,6 +100,7 @@ button:hover { background: rgba(255,255,255,0.16); box-shadow: 0 6px 16px rgba(0
 .info-chip strong { font-size: 13px; }
 .detail-section h3 { margin: 0 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.68; }
 .tag-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag-pills { width: 100%; }
 .tag-pill { padding: 4px 9px; border-radius: 10px; font-size: 12px; background: rgba(255,255,255,0.08); color: inherit; cursor: pointer; }
 .tag-pill[data-kind="negative"] { background: rgba(255,84,112,0.24); color: #ffc8d4; }
 .tag-pill[data-kind="description"] { background: rgba(96,212,148,0.18); color: #d0ffe4; }
@@ -448,9 +452,11 @@ function renderCard(item) {
             <img src="${thumb}" data-full="${item.file_url}" loading="lazy" alt="${item.name}">
         </div>
         <div class="info">
+            <div class="info-row">
+                <div class="meta">${meta}</div>
+                <button class="similar-icon" data-id="${item.id}" title="Find similar" aria-label="Find similar">≈</button>
+            </div>
             ${scoreLine}
-            <div class="meta">${meta}</div>
-            <button class="similar-btn" data-id="${item.id}">Find Similar</button>
         </div>
     </article>`;
 }
@@ -474,7 +480,7 @@ function registerCardElement(cardEl, item) {
     cardEl.addEventListener('focus', () => {
         if (tagKeys.length) highlightFromCard(tagKeys, item.id);
     });
-    const similarBtn = cardEl.querySelector('.similar-btn');
+    const similarBtn = cardEl.querySelector('.similar-icon');
     if (similarBtn) {
         similarBtn.addEventListener('click', (event) => {
             event.stopPropagation();
@@ -542,7 +548,8 @@ function highlightFromFacet(key) {
 
 function updateStatus() {
     if (clipModeActive) {
-        statusEl.textContent = `CLIP ${searchState.images.length}`;
+        const total = clipTotal || searchState.total || 0;
+        statusEl.textContent = total ? `CLIP ${searchState.images.length}/${total}` : `CLIP ${searchState.images.length}`;
     } else {
         statusEl.textContent = `${searchState.images.length}/${searchState.total}`;
     }

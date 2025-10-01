@@ -339,7 +339,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             negative_text=negative_queries,
             positive_images=positive_images if isinstance(positive_images, list) else [],
             negative_images=negative_images if isinstance(negative_images, list) else [],
-            limit=limit,
+            limit=0,
             restrict_to_ids=restrict_ids,
         )
 
