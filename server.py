@@ -1,14 +1,20 @@
 """HTTP server for localbooru."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import mimetypes
+import os
+import shutil
 import threading
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, Optional
+
+from email.utils import formatdate
 
 from .clip import ClipIndexer, ClipProgress
 from .clip_search import perform_clip_search
@@ -26,6 +32,11 @@ from .search import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+try:  # Pillow optional for thumbnails
+    from PIL import Image
+except ImportError:  # pragma: no cover - optional dependency
+    Image = None  # type: ignore
 
 
 class LocalBooruRequestHandler(BaseHTTPRequestHandler):
@@ -50,6 +61,14 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/tags":
             self._handle_tags(parsed.query)
             return
+        if path.startswith("/files/"):
+            identifier = path[len("/files/") :]
+            self._handle_file(identifier)
+            return
+        if path.startswith("/thumbs/"):
+            identifier = path[len("/thumbs/") :]
+            self._handle_thumbnail(identifier)
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_POST(self) -> None:  # pragma: no cover - network path
@@ -68,6 +87,8 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
     def _handle_clip_status(self) -> None:
         progress: ClipProgress = self.server.progress  # type: ignore[attr-defined]
         payload = progress.snapshot(self.server.db)  # type: ignore[attr-defined]
+        config: Optional[LocalBooruConfig] = getattr(self.server, "config", None)
+        payload["enabled"] = bool(config and getattr(config, "clip_enabled", False))
         blob = json.dumps(payload).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")
@@ -276,6 +297,8 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         query = payload.get("query")
         positive = payload.get("positive") or []
         negative = payload.get("negative") or []
+        positive_images = payload.get("positive_images") or []
+        negative_images = payload.get("negative_images") or []
         tag_query = payload.get("tag_query") or ""
         limit = payload.get("limit") or 20
         try:
@@ -307,8 +330,10 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         results = perform_clip_search(
             db=db,
             config=config,
-            positive=positive_queries,
-            negative=negative_queries,
+            positive_text=positive_queries,
+            negative_text=negative_queries,
+            positive_images=positive_images if isinstance(positive_images, list) else [],
+            negative_images=negative_images if isinstance(negative_images, list) else [],
             limit=limit,
             restrict_to_ids=restrict_ids,
         )
@@ -354,6 +379,71 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
 
         self._send_json({"results": payload_results, "total": len(payload_results)})
 
+    def _lookup_image_path(self, image_id: int) -> Optional[str]:
+        db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
+        conn = db.new_connection()
+        try:
+            row = conn.execute("SELECT path FROM images WHERE id=?", (image_id,)).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None
+        return row["path"]
+
+    def _stream_path(self, path: Path, *, content_type: str, cache_control: str) -> None:
+        try:
+            stat = path.stat()
+            with path.open('rb') as fh:
+                self.send_response(HTTPStatus.OK)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(stat.st_size))
+                self.send_header('Cache-Control', cache_control)
+                self.send_header('Last-Modified', formatdate(stat.st_mtime, usegmt=True))
+                self.end_headers()
+                shutil.copyfileobj(fh, self.wfile)
+        except FileNotFoundError:
+            self.send_error(HTTPStatus.NOT_FOUND, "File missing")
+        except BrokenPipeError:  # pragma: no cover - client disconnected
+            LOGGER.warning("Client disconnected while streaming %s", path)
+
+    def _handle_file(self, identifier: str) -> None:
+        try:
+            image_id = int(identifier)
+        except ValueError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid identifier")
+            return
+        stored_path = self._lookup_image_path(image_id)
+        if not stored_path:
+            self.send_error(HTTPStatus.NOT_FOUND, "Image not found")
+            return
+        resolved = self.server.resolve_path(stored_path)  # type: ignore[attr-defined]
+        if resolved is None or not resolved.exists():
+            self.send_error(HTTPStatus.NOT_FOUND, "File missing")
+            return
+        content_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+        self._stream_path(resolved, content_type=content_type, cache_control="public, max-age=31536000")
+
+    def _handle_thumbnail(self, identifier: str) -> None:
+        try:
+            image_id = int(identifier)
+        except ValueError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid identifier")
+            return
+        stored_path = self._lookup_image_path(image_id)
+        if not stored_path:
+            self.send_error(HTTPStatus.NOT_FOUND, "Image not found")
+            return
+        resolved = self.server.resolve_path(stored_path)  # type: ignore[attr-defined]
+        if resolved is None or not resolved.exists():
+            self.send_error(HTTPStatus.NOT_FOUND, "File missing")
+            return
+        thumb_path = self.server.ensure_thumbnail(resolved)  # type: ignore[attr-defined]
+        if thumb_path and thumb_path.exists():
+            self._stream_path(thumb_path, content_type="image/jpeg", cache_control="public, max-age=86400")
+            return
+        fallback_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+        self._stream_path(resolved, content_type=fallback_type, cache_control="public, max-age=31536000")
+
     def log_message(self, format: str, *args) -> None:  # pragma: no cover - adjust logging
         LOGGER.info("%s - %s", self.address_string(), format % args)
 
@@ -392,6 +482,92 @@ class LocalBooruHTTPServer(ThreadingHTTPServer):
         self.scanner = scanner
         self.progress = progress
         self.clip_indexer = clip_indexer
+        self._thumb_lock = threading.Lock()
+
+        def _resolve_base(path: Path) -> Path:
+            if path is None:
+                return Path.cwd()
+            try:
+                return path.resolve(strict=False)
+            except Exception:  # pragma: no cover - fallback
+                return path.absolute()
+
+        if config is not None:
+            bases = [_resolve_base(config.root), *(_resolve_base(p) for p in config.extra_roots)]
+            # preserve order while removing duplicates
+            self.allowed_roots = list(dict.fromkeys(bases))
+            self.thumb_cache = _resolve_base(config.thumb_cache)
+            self.thumb_cache.mkdir(parents=True, exist_ok=True)
+            self.thumb_size = config.thumb_size
+            self.pillow_available = bool(config.enable_thumbs and Image is not None)
+        else:  # pragma: no cover - defensive
+            base = Path.cwd()
+            self.allowed_roots = [base]
+            self.thumb_cache = base
+            self.thumb_size = 512
+            self.pillow_available = False
+
+    def _is_within_allowed(self, path: Path) -> bool:
+        resolved = path.resolve(strict=False)
+        for base in self.allowed_roots:
+            try:
+                resolved.relative_to(base)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    def resolve_path(self, stored_path: str) -> Optional[Path]:
+        candidate = Path(stored_path)
+        search_paths = []
+        if candidate.is_absolute():
+            search_paths.append(candidate)
+        else:
+            if self.config is not None:
+                search_paths.append(self.config.root / candidate)
+                for extra in self.allowed_roots[1:]:
+                    search_paths.append(extra / candidate)
+        for option in search_paths:
+            resolved = option.resolve(strict=False)
+            if self._is_within_allowed(resolved):
+                return resolved
+        return None
+
+    def thumbnail_cache_key(self, source: Path) -> str:
+        resolved = source.resolve(strict=False)
+        return hashlib.sha1(str(resolved).encode('utf-8')).hexdigest()
+
+    def ensure_thumbnail(self, source: Path) -> Optional[Path]:
+        if not self.pillow_available or Image is None:
+            return None
+        try:
+            source_stat = source.stat()
+        except FileNotFoundError:
+            return None
+        cache_key = self.thumbnail_cache_key(source)
+        dest = self.thumb_cache / f"{cache_key}.jpg"
+        if dest.exists() and dest.stat().st_mtime >= source_stat.st_mtime:
+            return dest
+        with self._thumb_lock:
+            if dest.exists() and dest.stat().st_mtime >= source_stat.st_mtime:
+                return dest
+            try:
+                with Image.open(source) as img:
+                    img = img.convert('RGB')
+                    resample = getattr(Image, 'Resampling', None)
+                    if resample and hasattr(resample, 'LANCZOS'):
+                        method = resample.LANCZOS
+                    else:
+                        method = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', Image.BICUBIC))
+                    img.thumbnail((self.thumb_size, self.thumb_size), method)
+                    temp = dest.with_suffix('.tmp.jpg')
+                    img.save(temp, format='JPEG', quality=88, optimize=True)
+                    temp.replace(dest)
+                    os.utime(dest, (source_stat.st_mtime, source_stat.st_mtime), follow_symlinks=False)
+            except Exception:  # pragma: no cover - thumbnail generation best-effort
+                LOGGER.exception("Failed to create thumbnail for %s", source)
+                return None
+        return dest
 
 
 def run_server(

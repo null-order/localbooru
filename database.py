@@ -215,3 +215,12 @@ class LocalBooruDatabase:
     def purge_clip_vectors(self, model: str) -> None:
         with self._connection:
             self._connection.execute("DELETE FROM clip_embeddings WHERE model=?", (model,))
+
+    def fetch_clip_vector(self, image_id: int, model: str) -> Optional[bytes]:
+        row = self._connection.execute(
+            "SELECT vector FROM clip_embeddings WHERE image_id=? AND model=? AND status='ready'",
+            (image_id, model),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["vector"]

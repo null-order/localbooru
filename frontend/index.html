@@ -37,7 +37,23 @@ button:hover { background: rgba(255,255,255,0.16); box-shadow: 0 6px 16px rgba(0
 .clip-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; opacity: 0.78; }
 .clip-toggle { border-radius: 999px; padding: 6px 12px; font-size: 12px; background: rgba(14, 197, 255, 0.18); color: #67e8f9; }
 .clip-toggle:hover { background: rgba(14, 197, 255, 0.28); }
+
 .clip-status-error { color: #fda4af; font-weight: 600; }
+.clip-search { display: flex; gap: 8px; align-items: center; }
+.clip-search input { flex: 1; padding: 8px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.18); background: rgba(12,14,24,0.92); color: inherit; }
+.clip-search input:focus { outline: none; border-color: #22d3ee; box-shadow: 0 0 0 1px rgba(34,211,238,0.45); }
+.clip-search button { padding: 8px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.08); color: inherit; cursor: pointer; transition: background 0.15s ease, box-shadow 0.15s ease; }
+.clip-search button:hover { background: rgba(255,255,255,0.16); box-shadow: 0 6px 14px rgba(0,0,0,0.25); }
+.clip-search button.secondary { background: transparent; border-color: rgba(255,255,255,0.2); }
+.clip-search button.secondary:hover { background: rgba(255,255,255,0.08); }
+.clip-score { font-size: 12px; color: #7dd3fc; letter-spacing: 0.02em; }
+.similar-btn { margin-top: 6px; align-self: flex-start; font-size: 12px; padding: 6px 10px; border-radius: 999px; background: rgba(34,211,238,0.18); color: #67e8f9; border: 1px solid rgba(34,211,238,0.4); cursor: pointer; }
+.similar-btn:hover { background: rgba(34,211,238,0.28); box-shadow: 0 6px 14px rgba(14,116,144,0.35); }
+.ghost-btn { background: transparent; border: 1px solid rgba(255,255,255,0.3); color: inherit; padding: 6px 12px; border-radius: 999px; cursor: pointer; }
+.ghost-btn:hover { background: rgba(255,255,255,0.12); }
+.detail-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.detail-actions { display: flex; gap: 8px; align-items: center; }
+.detail-actions button { font-size: 13px; }
 .controls { display: flex; gap: 10px; align-items: center; }
 #load-more { margin: 28px auto 0; display: none; }
 #scroll-sentinel { width: 100%; height: 1px; }
@@ -133,6 +149,11 @@ button:hover { background: rgba(255,255,255,0.16); box-shadow: 0 6px 16px rgba(0
 <label id="hide-uc-label"><input type="checkbox" id="hide-uc" checked> Hide UC tags</label>
 <span id="status"></span>
 </div>
+<div class="clip-search">
+  <input id="clip-query" type="text" placeholder="CLIP search…" autocomplete="off" />
+  <button id="clip-search">Search</button>
+  <button id="clip-clear" class="secondary">Reset</button>
+</div>
 <div class="clip-widget" id="clip-widget">
   <div class="clip-progress"><div class="clip-progress-bar" id="clip-progress-bar"></div></div>
   <div class="clip-meta">
@@ -157,7 +178,10 @@ button:hover { background: rgba(255,255,255,0.16); box-shadow: 0 6px 16px rgba(0
   <div id="detail-card">
     <div class="detail-header">
       <h2 id="detail-title"></h2>
-      <button id="detail-close">Close</button>
+      <div class="detail-actions">
+        <button id="detail-similar" class="ghost-btn">Find Similar</button>
+        <button id="detail-close">Close</button>
+      </div>
     </div>
     <div class="detail-body">
       <div class="detail-image">
@@ -215,6 +239,9 @@ const clipWidget = document.getElementById('clip-widget');
 const clipSummary = document.getElementById('clip-summary');
 const clipProgressBar = document.getElementById('clip-progress-bar');
 const clipToggleBtn = document.getElementById('clip-toggle');
+const clipSearchInput = document.getElementById('clip-query');
+const clipSearchButton = document.getElementById('clip-search');
+const clipSearchClear = document.getElementById('clip-clear');
 const loadMoreBtn = document.getElementById('load-more');
 const suggestionsEl = document.getElementById('tag-suggestions');
 const facetListEl = document.getElementById('facet-tags');
@@ -234,6 +261,8 @@ const detailPrevBtn = document.getElementById('detail-prev');
 const detailNextBtn = document.getElementById('detail-next');
 const detailCounter = document.getElementById('detail-counter');
 const detailCloseBtn = document.getElementById('detail-close');
+const detailSimilarBtn = document.getElementById('detail-similar');
+if (detailSimilarBtn) detailSimilarBtn.disabled = true;
 const hideUCCheckbox = document.getElementById('hide-uc');
 const sentinel = document.getElementById('scroll-sentinel');
 const detailHotspots = document.getElementById('detail-hotspots');
@@ -265,6 +294,10 @@ const searchState = {
     loading: false,
     done: false,
 };
+
+let clipEnabled = true;
+let clipModeActive = false;
+let lastClipPayload = null;
 
 let currentDetailId = null;
 let currentDetailIndex = -1;
@@ -402,13 +435,16 @@ function renderCard(item) {
     const meta = `${item.width ?? '–'}×${item.height ?? '–'} • seed ${item.seed ?? '–'} • ${item.model ?? ''}`;
     const thumb = item.thumb_url || item.file_url;
     const ratio = item.width && item.height ? `${item.width} / ${item.height}` : '2 / 3';
+    const scoreLine = typeof item.score === 'number' ? `<div class="clip-score">score ${item.score.toFixed(3)}</div>` : '';
     return `
     <article class="card" data-id="${item.id}">
         <div class="image-wrap" style="aspect-ratio:${ratio};">
             <img src="${thumb}" data-full="${item.file_url}" loading="lazy" alt="${item.name}">
         </div>
         <div class="info">
+            ${scoreLine}
             <div class="meta">${meta}</div>
+            <button class="similar-btn" data-id="${item.id}">Find Similar</button>
         </div>
     </article>`;
 }
@@ -432,6 +468,16 @@ function registerCardElement(cardEl, item) {
     cardEl.addEventListener('focus', () => {
         if (tagKeys.length) highlightFromCard(tagKeys, item.id);
     });
+    const similarBtn = cardEl.querySelector('.similar-btn');
+    if (similarBtn) {
+        similarBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const imageId = Number(similarBtn.dataset.id);
+            if (!Number.isFinite(imageId)) return;
+            if (!clipEnabled) return;
+            runClipSearch({ positiveImages: [imageId], tagQuery: searchBox.value.trim(), updateInput: `image:${imageId}` });
+        });
+    }
     cardEl.addEventListener('blur', () => {
         clearHighlights();
     });
@@ -489,10 +535,18 @@ function highlightFromFacet(key) {
 }
 
 function updateStatus() {
-    statusEl.textContent = `${searchState.images.length}/${searchState.total}`;
+    if (clipModeActive) {
+        statusEl.textContent = `CLIP ${searchState.images.length}`;
+    } else {
+        statusEl.textContent = `${searchState.images.length}/${searchState.total}`;
+    }
 }
 
-function resetState(query) {
+function resetState(query, { clearClip = true } = {}) {
+    if (clearClip) {
+        clipModeActive = false;
+        lastClipPayload = null;
+    }
     searchState.query = query;
     searchState.images = [];
     searchState.index = new Map();
@@ -513,6 +567,8 @@ async function fetchImages(reset=false) {
     if (searchState.loading) return;
     if (reset) {
         resetState(lastQuery);
+    } else if (clipModeActive) {
+        return;
     }
     if (searchState.done && !reset) return;
     searchState.loading = true;
@@ -574,6 +630,95 @@ async function fetchImages(reset=false) {
         } else {
             scheduleScrollSave();
         }
+    }
+}
+
+async function runClipSearch({ query = '', positiveImages = [], negativeImages = [], tagQuery = searchBox.value.trim(), updateInput } = {}) {
+    if (!clipEnabled) {
+        statusEl.textContent = 'CLIP disabled';
+        return;
+    }
+    const trimmedQuery = (query || '').trim();
+    const posIds = Array.isArray(positiveImages) ? positiveImages.map(Number).filter(Number.isFinite) : [];
+    const negIds = Array.isArray(negativeImages) ? negativeImages.map(Number).filter(Number.isFinite) : [];
+    if (!trimmedQuery && posIds.length === 0 && negIds.length === 0) {
+        statusEl.textContent = 'Provide CLIP input';
+        return;
+    }
+    if (updateInput !== undefined && clipSearchInput) {
+        clipSearchInput.value = updateInput;
+    } else if (trimmedQuery && clipSearchInput) {
+        clipSearchInput.value = trimmedQuery;
+    }
+    clipModeActive = true;
+    searchState.loading = true;
+    if (detailSimilarBtn) detailSimilarBtn.disabled = true;
+    statusEl.textContent = 'CLIP search…';
+    if (clipSearchButton) clipSearchButton.disabled = true;
+    if (clipSearchClear) clipSearchClear.disabled = true;
+    const payload = { limit: PAGE_SIZE };
+    const tagFilter = (tagQuery || '').trim();
+    if (tagFilter) payload.tag_query = tagFilter;
+    if (trimmedQuery) payload.query = trimmedQuery;
+    if (posIds.length) payload.positive_images = posIds;
+    if (negIds.length) payload.negative_images = negIds;
+    lastClipPayload = {
+        query: trimmedQuery,
+        positiveImages: posIds.slice(),
+        negativeImages: negIds.slice(),
+        tagQuery: tagFilter,
+        updateInput: updateInput !== undefined ? updateInput : (trimmedQuery ? trimmedQuery : (posIds.length ? `image:${posIds[0]}` : ''))
+    };
+    try {
+        const res = await fetch('/api/search/clip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(`clip search failed: ${res.status}`);
+        const data = await res.json();
+        resetState(lastQuery, { clearClip: false });
+        searchState.images = [];
+        searchState.index = new Map();
+        searchState.imageTags = new Map();
+        gridEl.innerHTML = '';
+        if (autoObserver) {
+            autoObserver.unobserve(sentinel);
+        }
+        const results = Array.isArray(data.results) ? data.results : [];
+        results.forEach(item => {
+            const idx = searchState.images.length;
+            searchState.images.push(item);
+            searchState.index.set(item.id, idx);
+            searchState.imageTags.set(item.id, item.tags || []);
+            const template = document.createElement('template');
+            template.innerHTML = renderCard(item).trim();
+            const cardEl = template.content.firstElementChild;
+            registerCardElement(cardEl, item);
+            gridEl.appendChild(cardEl);
+        });
+        facetCache = [];
+        renderFacets(facetCache);
+        searchState.total = data.total || results.length;
+        searchState.done = true;
+        loadMoreBtn.style.display = 'none';
+        requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
+        updateStatus();
+    } catch (err) {
+        console.error(err);
+        statusEl.textContent = 'CLIP search failed';
+    } finally {
+        searchState.loading = false;
+        if (clipSearchButton) clipSearchButton.disabled = false;
+        if (clipSearchClear) clipSearchClear.disabled = false;
+        if (detailSimilarBtn) detailSimilarBtn.disabled = false;
+        updateStatus();
+    }
+}
+
+function rerunLastClipSearch() {
+    if (lastClipPayload) {
+        runClipSearch(lastClipPayload);
     }
 }
 
@@ -843,6 +988,40 @@ document.getElementById('clear').addEventListener('click', () => {
 
 loadMoreBtn.addEventListener('click', () => fetchImages());
 
+if (clipSearchButton) {
+    clipSearchButton.addEventListener('click', () => {
+        if (!clipEnabled) return;
+        const query = clipSearchInput ? clipSearchInput.value.trim() : '';
+        if (!query && lastClipPayload) {
+            runClipSearch(lastClipPayload);
+        } else {
+            runClipSearch({ query, tagQuery: searchBox.value.trim() });
+        }
+    });
+}
+if (clipSearchInput) {
+    clipSearchInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            if (!clipEnabled) return;
+            const query = clipSearchInput.value.trim();
+            if (!query && lastClipPayload) {
+                runClipSearch(lastClipPayload);
+            } else {
+                runClipSearch({ query, tagQuery: searchBox.value.trim() });
+            }
+        }
+    });
+}
+if (clipSearchClear) {
+    clipSearchClear.addEventListener('click', () => {
+        if (clipSearchInput) clipSearchInput.value = '';
+        if (clipModeActive) {
+            fetchImages(true);
+        }
+    });
+}
+
 hideUCCheckbox.addEventListener('change', () => {
     hideUCTags = hideUCCheckbox.checked;
     renderFacets(facetCache);
@@ -870,6 +1049,17 @@ gridEl.addEventListener('click', (event) => {
     if (!Number.isFinite(id)) return;
     openDetail(id);
 });
+
+if (detailSimilarBtn) {
+    detailSimilarBtn.addEventListener('click', () => {
+        const imageId = Number(currentDetailId);
+        if (!Number.isFinite(imageId)) return;
+        if (!clipEnabled) return;
+        const tagFilter = searchBox.value.trim();
+        closeDetail({ skipHistory: true });
+        runClipSearch({ positiveImages: [imageId], tagQuery: tagFilter, updateInput: `image:${imageId}` });
+    });
+}
 
 detailCloseBtn.addEventListener('click', () => closeDetail());
 
@@ -1054,6 +1244,10 @@ async function openDetail(id, options = {}) {
             detailDescSection.style.display = 'none';
         }
         currentDetailId = detailId;
+        if (detailSimilarBtn) {
+            detailSimilarBtn.disabled = !clipEnabled;
+            detailSimilarBtn.dataset.id = String(detailId);
+        }
         currentDetailIndex = searchState.index.has(detailId) ? searchState.index.get(detailId) : -1;
         updateDetailControls();
         detailOverlay.classList.add('active');
@@ -1244,6 +1438,10 @@ function closeDetail({ skipHistory = false } = {}) {
         return;
     }
     detailOverlay.classList.remove('active');
+    if (detailSimilarBtn) {
+        detailSimilarBtn.disabled = true;
+        detailSimilarBtn.dataset.id = '';
+    }
     currentDetailId = null;
     currentDetailIndex = -1;
     clearHotspots();
@@ -1362,6 +1560,29 @@ async function pollClipStatus() {
     const res = await fetch('/api/status/clip');
     if (!res.ok) throw new Error('status ' + res.status);
     const data = await res.json();
+    const enabled = data.enabled !== false;
+    clipEnabled = enabled;
+    if (!enabled) {
+      clipWidget.classList.add('clip-status-error');
+      clipSummary.textContent = 'CLIP disabled';
+      if (clipToggleBtn) {
+        clipToggleBtn.hidden = true;
+        clipToggleBtn.dataset.state = 'paused';
+      }
+      if (clipSearchInput) clipSearchInput.disabled = true;
+      if (clipSearchButton) clipSearchButton.disabled = true;
+      if (clipSearchClear) clipSearchClear.disabled = true;
+      if (detailSimilarBtn) {
+        detailSimilarBtn.disabled = true;
+        detailSimilarBtn.dataset.id = '';
+      }
+      return;
+    }
+    if (clipSearchInput) clipSearchInput.disabled = false;
+    if (clipSearchClear && !searchState.loading) clipSearchClear.disabled = false;
+    if (clipSearchButton && !searchState.loading) clipSearchButton.disabled = false;
+    if (detailSimilarBtn && Number.isFinite(currentDetailId)) detailSimilarBtn.disabled = false;
+
     const total = data.total || 0;
     const completed = data.completed || 0;
     const processing = data.processing || 0;
@@ -1370,9 +1591,11 @@ async function pollClipStatus() {
     clipProgressBar.style.width = `${percent}%`;
     clipProgressBar.dataset.label = `${percent}%`;
     clipSummary.textContent = `State: ${data.state} • ${completed}/${total} done`;
-    clipToggleBtn.hidden = !total;
-    clipToggleBtn.textContent = data.state === 'paused' ? 'Resume' : 'Pause';
-    clipToggleBtn.dataset.state = data.state;
+    if (clipToggleBtn) {
+      clipToggleBtn.hidden = !total;
+      clipToggleBtn.textContent = data.state === 'paused' ? 'Resume' : 'Pause';
+      clipToggleBtn.dataset.state = data.state;
+    }
     clipWidget.classList.remove('clip-status-error');
     if (Array.isArray(data.error_sample) && data.error_sample.length) {
       clipWidget.classList.add('clip-status-error');
@@ -1383,6 +1606,7 @@ async function pollClipStatus() {
     clipWidget.classList.add('clip-status-error');
   }
 }
+
 async function toggleClipIndexer() {
   if (!clipToggleBtn) return;
   const state = clipToggleBtn.dataset.state;
