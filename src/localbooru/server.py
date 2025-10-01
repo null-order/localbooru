@@ -12,7 +12,7 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 from email.utils import formatdate
 
@@ -37,6 +37,68 @@ try:  # Pillow optional for thumbnails
     from PIL import Image
 except ImportError:  # pragma: no cover - optional dependency
     Image = None  # type: ignore
+
+
+FACET_KIND_ORDER = {
+    "prompt": 0,
+    "character": 0,
+    "description": 0,
+    "negative": 1,
+}
+
+
+def _coerce_bool(value, default=True):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"", "0", "false", "no", "off"}:
+            return False
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+    return default
+
+
+def summarize_facets_from_tag_map(
+    tag_map: Dict[int, List[Dict[str, object]]],
+) -> List[Dict[str, object]]:
+    summary: Dict[Tuple[str, str], Dict[str, object]] = {}
+    for tags in tag_map.values():
+        if not isinstance(tags, list):
+            continue
+        seen: Set[Tuple[str, str]] = set()
+        for tag in tags:
+            if not isinstance(tag, dict):
+                continue
+            norm = tag.get("norm")
+            kind = tag.get("kind")
+            if not isinstance(norm, str) or not norm:
+                continue
+            if not isinstance(kind, str) or not kind:
+                continue
+            key = (kind, norm)
+            if key in seen:
+                continue
+            seen.add(key)
+            label = tag.get("tag")
+            label_str = label if isinstance(label, str) and label else norm
+            entry = summary.get(key)
+            if entry is None:
+                entry = {"tag": label_str, "norm": norm, "kind": kind, "freq": 0}
+                summary[key] = entry
+            entry["freq"] += 1
+
+    def sort_key(item: Dict[str, object]) -> Tuple[int, int, str]:
+        kind = item.get("kind")
+        kind_rank = FACET_KIND_ORDER.get(kind, 2)
+        freq = int(item.get("freq", 0))
+        tag_label = item.get("tag")
+        tag_str = tag_label if isinstance(tag_label, str) else ""
+        return (kind_rank, -freq, tag_str)
+
+    return sorted(summary.values(), key=sort_key)
 
 
 class LocalBooruRequestHandler(BaseHTTPRequestHandler):
@@ -81,6 +143,9 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/search/clip":
             self._handle_clip_search()
+            return
+        if parsed.path == "/api/image-tags":
+            self._handle_image_tags()
             return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
@@ -302,6 +367,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         tag_query = payload.get("tag_query") or ""
         limit = payload.get("limit") or 20
         offset = payload.get("offset") or 0
+        include_tags = _coerce_bool(payload.get("include_tags", True), True)
         try:
             limit = max(1, min(int(limit), 200))
         except (ValueError, TypeError):
@@ -352,11 +418,13 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
 
         image_ids = [image_id for image_id, _score in window]
         conn = db.new_connection()
+        tag_map: Dict[int, List[Dict[str, object]]] = {}
         try:
             placeholders = ",".join("?" for _ in image_ids)
             sql = f"SELECT * FROM images WHERE id IN ({placeholders})"
             rows = conn.execute(sql, tuple(image_ids)).fetchall()
-            tag_map = fetch_tags_for_images(conn, image_ids)
+            if include_tags:
+                tag_map = fetch_tags_for_images(conn, image_ids)
         finally:
             conn.close()
 
@@ -385,12 +453,65 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 }
             )
 
+        facets_payload = summarize_facets_from_tag_map(tag_map) if include_tags else []
+
         self._send_json({
             "results": payload_results,
             "total": total,
             "offset": offset,
             "limit": limit,
+            "facets": facets_payload,
         })
+
+    def _handle_image_tags(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Missing request body")
+            return
+        try:
+            raw_body = self.rfile.read(length)
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.error("Failed to read tag payload: %s", exc)
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid body")
+            return
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON")
+            return
+        ids_raw = payload.get("ids")
+        if not isinstance(ids_raw, list):
+            self.send_error(HTTPStatus.BAD_REQUEST, "ids must be a list")
+            return
+        image_ids: List[int] = []
+        for value in ids_raw:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed < 0:
+                continue
+            image_ids.append(parsed)
+        if not image_ids:
+            self._send_json({"tags": {}})
+            return
+
+        db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
+        conn = db.new_connection()
+        try:
+            tag_map = fetch_tags_for_images(conn, image_ids)
+        finally:
+            conn.close()
+
+        serializable: Dict[str, List[Dict[str, object]]] = {
+            str(image_id): tags for image_id, tags in tag_map.items()
+        }
+        for image_id in image_ids:
+            key = str(image_id)
+            if key not in serializable:
+                serializable[key] = []
+
+        self._send_json({"tags": serializable})
 
     def _lookup_image_path(self, image_id: int) -> Optional[str]:
         db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]

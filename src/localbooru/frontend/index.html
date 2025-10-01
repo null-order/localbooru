@@ -72,18 +72,18 @@ button:hover { background: rgba(255,255,255,0.16); box-shadow: 0 6px 16px rgba(0
 #facet-tags .count { opacity: 0.6; font-size: 12px; }
 #detail-overlay { position: fixed; inset: 0; background: rgba(7,9,14,0.92); backdrop-filter: blur(12px); display: none; align-items: center; justify-content: center; z-index: 10; padding: 36px; }
 #detail-overlay.active { display: flex; }
-#detail-card { background: rgba(18,21,32,0.98); border-radius: 20px; border: 1px solid rgba(255,255,255,0.15); max-width: min(1700px, 98vw); max-height: 92vh; width: 100%; padding: 22px 26px 26px; display: flex; flex-direction: column; gap: 18px; overflow: hidden; }
+#detail-card { background: rgba(18,21,32,0.98); border-radius: 20px; border: 1px solid rgba(255,255,255,0.15); max-width: min(1700px, 96vw); max-height: 92vh; width: auto; padding: 22px 26px 26px; display: flex; flex-direction: column; gap: 18px; overflow: hidden; align-items: flex-start; }
 .detail-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.08); }
 .detail-header h2 { margin: 0; font-size: 18px; letter-spacing: 0.03em; text-transform: uppercase; opacity: 0.85; }
 #detail-close { background: rgba(255,255,255,0.06); border-radius: 999px; padding: 6px 14px; font-size: 13px; }
-.detail-body { display: flex; gap: 24px; flex: 1 1 auto; overflow: hidden; align-items: stretch; }
-.detail-image { position: relative; flex: 1 1 0; min-width: 0; display: flex; justify-content: center; align-items: center; background: linear-gradient(135deg, rgba(27,30,44,0.7), rgba(16,18,28,0.9)); border-radius: 18px; padding: 16px; aspect-ratio: var(--image-aspect, 3 / 4); max-height: 100%; max-width: min(60vw, 960px); }
-.detail-image img { max-width: 100%; max-height: 100%; width: 100%; height: auto; object-fit: contain; border-radius: 12px; background: #0c0f18; box-shadow: 0 16px 32px rgba(5,7,14,0.55); aspect-ratio: var(--image-aspect, auto); }
+.detail-body { display: flex; gap: 28px; flex: 1 1 auto; overflow: hidden; align-items: flex-start; justify-content: center; }
+.detail-image { position: relative; flex: 0 0 auto; min-width: 0; display: flex; justify-content: center; align-items: center; align-self: flex-start; background: linear-gradient(135deg, rgba(27,30,44,0.7), rgba(16,18,28,0.9)); border-radius: 18px; padding: 16px; max-height: calc(92vh - 160px); max-width: min(70vw, 980px); }
+.detail-image img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; border-radius: 12px; background: #0c0f18; box-shadow: 0 16px 32px rgba(5,7,14,0.55); }
 #detail-hotspots { position: absolute; inset: 16px; pointer-events: none; }
 .hotspot-dot { position: absolute; width: 22px; height: 22px; border-radius: 50%; background: radial-gradient(circle at center, rgba(255,255,255,0.95) 0%, rgba(90,240,255,0.85) 45%, rgba(0,110,148,0.85) 70%, rgba(0,0,0,0.35) 100%); outline: 2px solid rgba(0,0,0,0.35); outline-offset: 4px; transform: translate(-50%, -50%); box-shadow: 0 0 24px rgba(90,240,255,0.75); opacity: 0; transition: opacity 0.18s ease; }
 .hotspot-dot::after { content: ''; position: absolute; inset: -11px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.45); }
 .hotspot-dot.visible { opacity: 1; animation: hotspotPulse 1.5s ease-in-out infinite; }
-.detail-meta { width: clamp(320px, 32vw, 420px); flex-shrink: 0; display: flex; flex-direction: column; gap: 18px; max-height: 100%; overflow-y: auto; padding-right: 6px; }
+.detail-meta { width: clamp(320px, 32vw, 420px); flex: 0 0 auto; display: flex; flex-direction: column; gap: 18px; max-height: calc(92vh - 160px); overflow-y: auto; padding-right: 6px; align-self: flex-start; }
 .detail-meta::-webkit-scrollbar { width: 6px; }
 .detail-meta::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 999px; }
 .detail-info { display: flex; flex-wrap: wrap; gap: 10px; }
@@ -140,8 +140,9 @@ button:hover { background: rgba(255,255,255,0.16); box-shadow: 0 6px 16px rgba(0
 @media (max-width: 900px) {
     #detail-overlay { padding: 24px; }
     #detail-card { padding: 18px; }
-    .detail-body { flex-direction: column; }
-    .detail-meta { width: 100%; }
+    .detail-body { flex-direction: column; align-items: center; }
+    .detail-image { max-width: 100%; max-height: 60vh; }
+    .detail-meta { width: 100%; max-height: none; }
 }
 </style>
 </head>
@@ -283,7 +284,8 @@ let suggestionItems = [];
 let suggestionIndex = -1;
 const headerEl = document.querySelector('header');
 const PAGE_SIZE = 40;
-let currentHistoryState = { query: '', detail: null, pos: 0 };
+const TAG_FETCH_BATCH_SIZE = 80;
+let currentHistoryState = { query: '', detail: null, pos: 0, clip: null };
 let pendingScrollIndex = null;
 let scrollRestorePending = false;
 let scrollSaveScheduled = false;
@@ -304,6 +306,7 @@ let clipModeActive = false;
 let lastClipPayload = null;
 let clipTotal = 0;
 let clipOffset = 0;
+let currentClipToken = null;
 
 let currentDetailId = null;
 let currentDetailIndex = -1;
@@ -317,6 +320,27 @@ let lastQuery = '';
 let pendingDetailId = null;
 let clipSearchTimer = null;
 const CLIP_SEARCH_DEBOUNCE = 400;
+
+function getActiveClipToken() {
+    if (!clipModeActive) {
+        return null;
+    }
+    if (currentClipToken) {
+        return currentClipToken;
+    }
+    if (lastClipPayload && typeof lastClipPayload === 'object') {
+        if (typeof lastClipPayload.clipToken === 'string' && lastClipPayload.clipToken) {
+            currentClipToken = lastClipPayload.clipToken;
+            return lastClipPayload.clipToken;
+        }
+        const encoded = encodeClipState(lastClipPayload);
+        if (encoded) {
+            currentClipToken = encoded;
+            return encoded;
+        }
+    }
+    return null;
+}
 
 function normalizeDetail(value) {
     if (value === null || value === undefined) return null;
@@ -334,15 +358,212 @@ function normalizeIndex(value) {
     return intVal >= 0 ? intVal : null;
 }
 
+function encodeClipState(payload) {
+    if (!payload) return null;
+    if (payload.positiveImages && payload.positiveImages.length) {
+        const id = Number(payload.positiveImages[0]);
+        if (Number.isFinite(id)) {
+            return `image:${id}`;
+        }
+    }
+    if (payload.query && payload.query.trim()) {
+        return `text:${encodeURIComponent(payload.query.trim())}`;
+    }
+    return null;
+}
+
+function decodeClipState(value) {
+    if (typeof value !== 'string' || !value) {
+        return null;
+    }
+    if (value.startsWith('image:')) {
+        const id = Number(value.slice(6));
+        if (Number.isFinite(id)) {
+            return { mode: 'image', id };
+        }
+        return null;
+    }
+    if (value.startsWith('text:')) {
+        try {
+            const query = decodeURIComponent(value.slice(5));
+            return { mode: 'text', query };
+        } catch (err) {
+            console.error('Failed to decode clip text state', err);
+            return null;
+        }
+    }
+    return null;
+}
+
+function buildClipFacetSummaryFromImageTags(imageTagMap) {
+    const buckets = new Map();
+    if (!(imageTagMap instanceof Map)) {
+        return [];
+    }
+    imageTagMap.forEach(tagList => {
+        const tags = Array.isArray(tagList) ? tagList : [];
+        const seen = new Set();
+        tags.forEach(tag => {
+            if (!tag || typeof tag !== 'object') return;
+            const norm = typeof tag.norm === 'string' ? tag.norm : '';
+            if (!norm) return;
+            const kind = typeof tag.kind === 'string' ? tag.kind : 'prompt';
+            const key = `${kind}|${norm}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            if (!buckets.has(key)) {
+                buckets.set(key, {
+                    tag: typeof tag.tag === 'string' && tag.tag ? tag.tag : norm,
+                    norm,
+                    kind,
+                    freq: 0,
+                });
+            }
+            const entry = buckets.get(key);
+            entry.freq += 1;
+        });
+    });
+    return Array.from(buckets.values()).sort((a, b) => {
+        if (b.freq !== a.freq) {
+            return b.freq - a.freq;
+        }
+        return a.tag.localeCompare(b.tag);
+    });
+}
+
+function applyTagsToCard(imageId, tags) {
+    if (!cardElements.has(imageId)) {
+        return;
+    }
+    const normalized = [];
+    if (Array.isArray(tags)) {
+        tags.forEach(tag => {
+            if (!tag || typeof tag !== 'object') return;
+            const norm = typeof tag.norm === 'string' ? tag.norm : '';
+            if (!norm) return;
+            const kind = typeof tag.kind === 'string' ? tag.kind : 'prompt';
+            const label = typeof tag.tag === 'string' && tag.tag ? tag.tag : norm;
+            const emphasis = typeof tag.emphasis === 'string' ? tag.emphasis : 'normal';
+            const weight = Number.isFinite(tag.weight) ? Number(tag.weight) : 1;
+            normalized.push({ tag: label, norm, kind, emphasis, weight });
+        });
+    }
+
+    const previous = searchState.imageTags.get(imageId) || [];
+    const previousKeys = new Set(previous.map(tag => `${tag.kind}|${tag.norm}`));
+    previousKeys.forEach(key => {
+        const bucket = tagToCards.get(key);
+        if (bucket) {
+            bucket.delete(imageId);
+            if (!bucket.size) {
+                tagToCards.delete(key);
+            }
+        }
+    });
+
+    searchState.imageTags.set(imageId, normalized);
+
+    const newKeys = new Set();
+    normalized.forEach(tag => {
+        const key = `${tag.kind}|${tag.norm}`;
+        if (newKeys.has(key)) return;
+        newKeys.add(key);
+        if (!tagToCards.has(key)) {
+            tagToCards.set(key, new Set());
+        }
+        tagToCards.get(key).add(imageId);
+    });
+}
+
+async function loadTagsForImageIds(imageIds) {
+    if (!clipModeActive) {
+        return;
+    }
+    const uniqueIds = Array.from(new Set((Array.isArray(imageIds) ? imageIds : []).map(Number))).filter(id => Number.isFinite(id) && id >= 0);
+    const missing = uniqueIds.filter(id => {
+        const tags = searchState.imageTags.get(id);
+        return !tags || !tags.length;
+    });
+    if (!missing.length) {
+        return;
+    }
+    for (let index = 0; index < missing.length; index += TAG_FETCH_BATCH_SIZE) {
+        if (!clipModeActive) {
+            return;
+        }
+        const batch = missing.slice(index, index + TAG_FETCH_BATCH_SIZE);
+        await fetchTagBatch(batch);
+    }
+    if (!clipModeActive) {
+        return;
+    }
+    facetCache = buildClipFacetSummaryFromImageTags(searchState.imageTags);
+    renderFacets(facetCache);
+}
+
+async function fetchTagBatch(batchIds) {
+    if (!Array.isArray(batchIds) || !batchIds.length) {
+        return;
+    }
+    try {
+        const res = await fetch('/api/image-tags', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: batchIds }),
+        });
+        if (!res.ok) throw new Error(`tag fetch failed: ${res.status}`);
+        const payload = await res.json();
+        if (!clipModeActive) {
+            return;
+        }
+        const tagMap = payload && payload.tags;
+        if (tagMap && typeof tagMap === 'object') {
+            Object.entries(tagMap).forEach(([idStr, tagList]) => {
+                const imageId = Number(idStr);
+                if (!Number.isFinite(imageId)) return;
+                if (!cardElements.has(imageId)) return;
+                const tags = Array.isArray(tagList) ? tagList : [];
+                applyTagsToCard(imageId, tags);
+            });
+        }
+    } catch (err) {
+        console.error('Failed to load tags for images', err);
+    }
+}
+
+function buildClipPayloadFromToken(token, tagQuery) {
+    const decoded = decodeClipState(token);
+    if (!decoded) return null;
+    if (decoded.mode === 'image' && Number.isFinite(decoded.id)) {
+        const id = Number(decoded.id);
+        return {
+            positiveImages: [id],
+            tagQuery,
+            updateInput: `image:${id}`,
+        };
+    }
+    if (decoded.mode === 'text') {
+        const text = (decoded.query || '').trim();
+        return {
+            query: text,
+            tagQuery,
+            updateInput: text,
+        };
+    }
+    return null;
+}
+
 function parseStateFromLocation() {
     const params = new URLSearchParams(window.location.search);
     const query = (params.get('q') || '').trim();
     const detailParam = params.get('detail');
     const posParam = params.get('pos');
+    const clipParam = params.get('clip');
     return {
         query,
         detail: normalizeDetail(detailParam),
         pos: normalizeIndex(posParam),
+        clip: clipParam || null,
     };
 }
 
@@ -359,6 +580,9 @@ function buildUrlFromState(state) {
     if (normalizedPos !== null && normalizedPos > 0) {
         params.set('pos', String(normalizedPos));
     }
+    if (state.clip) {
+        params.set('clip', state.clip);
+    }
     const search = params.toString();
     return `${window.location.pathname}${search ? `?${search}` : ''}`;
 }
@@ -367,10 +591,12 @@ function pushHistoryState(state, { replace = false } = {}) {
     const queryValue = (state.query ?? currentHistoryState.query ?? '').trim();
     const detailValue = state.detail !== undefined ? normalizeDetail(state.detail) : normalizeDetail(currentHistoryState.detail);
     const posCandidate = state.pos !== undefined ? normalizeIndex(state.pos) : normalizeIndex(currentHistoryState.pos);
+    const clipValue = state.clip !== undefined ? state.clip : (currentHistoryState.clip ?? null);
     const normalizedState = {
         query: queryValue,
         detail: detailValue,
         pos: posCandidate ?? 0,
+        clip: clipValue || null,
     };
     const url = buildUrlFromState(normalizedState);
     if (replace) {
@@ -379,6 +605,7 @@ function pushHistoryState(state, { replace = false } = {}) {
         history.pushState(normalizedState, '', url);
     }
     currentHistoryState = normalizedState;
+    currentClipToken = normalizedState.clip;
 }
 copyPositiveBtn.disabled = true;
 copyNegativeBtn.disabled = true;
@@ -461,22 +688,16 @@ function renderCard(item) {
 
 function registerCardElement(cardEl, item) {
     cardEl.tabIndex = 0;
-    const tagKeys = Array.from(new Set((item.tags || []).map(tag => `${tag.kind}|${tag.norm}`)));
     cardElements.set(item.id, cardEl);
-    tagKeys.forEach(key => {
-        if (!tagToCards.has(key)) {
-            tagToCards.set(key, new Set());
-        }
-        tagToCards.get(key).add(item.id);
-    });
+    applyTagsToCard(item.id, Array.isArray(item.tags) ? item.tags : []);
     cardEl.addEventListener('mouseenter', () => {
-        if (tagKeys.length) highlightFromCard(tagKeys, item.id);
+        highlightFromCard(item.id);
     });
     cardEl.addEventListener('mouseleave', () => {
         clearHighlights();
     });
     cardEl.addEventListener('focus', () => {
-        if (tagKeys.length) highlightFromCard(tagKeys, item.id);
+        highlightFromCard(item.id);
     });
     const similarBtn = cardEl.querySelector('.similar-icon');
     if (similarBtn) {
@@ -509,8 +730,16 @@ function clearHighlights() {
     activeCardIds.clear();
 }
 
-function highlightFromCard(tagKeys, cardId) {
+function highlightFromCard(cardId) {
     clearHighlights();
+    const tags = searchState.imageTags.get(cardId) || [];
+    const tagKeys = Array.from(new Set(tags.map(tag => {
+        if (!tag || typeof tag !== 'object') return null;
+        const norm = typeof tag.norm === 'string' ? tag.norm : '';
+        if (!norm) return null;
+        const kind = typeof tag.kind === 'string' ? tag.kind : 'prompt';
+        return `${kind}|${norm}`;
+    }).filter(Boolean)));
     tagKeys.forEach(key => {
         const facet = facetLookup.get(key);
         if (facet) {
@@ -557,6 +786,7 @@ function resetState(query, { clearClip = true } = {}) {
     if (clearClip) {
         clipModeActive = false;
         lastClipPayload = null;
+        currentClipToken = null;
         clipOffset = 0;
         clipTotal = 0;
     }
@@ -648,7 +878,7 @@ async function fetchImages(reset=false) {
 
 async function runClipSearch(
     { query = '', positiveImages = [], negativeImages = [], tagQuery = searchBox.value.trim(), updateInput } = {},
-    { append = false } = {}
+    { append = false, updateHistory = true } = {},
 ) {
     if (!clipEnabled) {
         statusEl.textContent = 'CLIP disabled';
@@ -662,7 +892,8 @@ async function runClipSearch(
         clipSearchTimer = null;
     }
 
-    const trimmedQuery = (query || '').trim();
+    const originalQuery = typeof query === 'string' ? query : '';
+    const trimmedQuery = originalQuery.trim();
     const posIds = Array.isArray(positiveImages) ? positiveImages.map(Number).filter(Number.isFinite) : [];
     const negIds = Array.isArray(negativeImages) ? negativeImages.map(Number).filter(Number.isFinite) : [];
     if (!trimmedQuery && posIds.length === 0 && negIds.length === 0) {
@@ -671,21 +902,29 @@ async function runClipSearch(
     }
     if (updateInput !== undefined && clipSearchInput) {
         clipSearchInput.value = updateInput;
-    } else if (trimmedQuery && clipSearchInput) {
-        clipSearchInput.value = trimmedQuery;
     }
 
     clipModeActive = true;
+    const clipToken = encodeClipState({ query: trimmedQuery, positiveImages: posIds }) || null;
     if (!append) {
         clipOffset = 0;
         clipTotal = 0;
         resetState(lastQuery, { clearClip: false });
+        if (!scrollRestorePending) {
+            pendingScrollIndex = 0;
+            scrollRestorePending = true;
+            lastAnchorIndex = 0;
+        }
         if (autoObserver) {
             autoObserver.unobserve(sentinel);
         }
+        facetCache = [];
+        renderFacets(facetCache);
     } else {
         statusEl.textContent = 'Loading clip results…';
     }
+
+    currentClipToken = clipToken ?? currentClipToken ?? null;
 
     searchState.loading = true;
     if (!append) {
@@ -698,6 +937,7 @@ async function runClipSearch(
     const payload = {
         limit: PAGE_SIZE,
         offset: append ? clipOffset : 0,
+        include_tags: false,
     };
     const tagFilter = (tagQuery || '').trim();
     if (tagFilter) payload.tag_query = tagFilter;
@@ -710,8 +950,17 @@ async function runClipSearch(
         positiveImages: posIds.slice(),
         negativeImages: negIds.slice(),
         tagQuery: tagFilter,
-        updateInput: updateInput !== undefined ? updateInput : (trimmedQuery ? trimmedQuery : (posIds.length ? `image:${posIds[0]}` : ''))
+        updateInput: updateInput !== undefined
+            ? updateInput
+            : (originalQuery !== '' ? originalQuery : (posIds.length ? `image:${posIds[0]}` : '')),
     };
+    if (clipToken) {
+        lastClipPayload.clipToken = clipToken;
+    } else {
+        delete lastClipPayload.clipToken;
+    }
+
+    let queueMoreForScroll = false;
 
     try {
         const res = await fetch('/api/search/clip', {
@@ -731,22 +980,38 @@ async function runClipSearch(
             requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
         }
 
+        const newImageIds = [];
         results.forEach(item => {
             const idx = searchState.images.length;
             searchState.images.push(item);
             searchState.index.set(item.id, idx);
-            searchState.imageTags.set(item.id, item.tags || []);
             const template = document.createElement('template');
             template.innerHTML = renderCard(item).trim();
             const cardEl = template.content.firstElementChild;
             registerCardElement(cardEl, item);
             gridEl.appendChild(cardEl);
+            if (Number.isFinite(item.id)) {
+                newImageIds.push(Number(item.id));
+            }
         });
 
         clipTotal = data.total ?? clipTotal ?? 0;
         clipOffset += results.length;
 
-        facetCache = [];
+        const backendFacets = Array.isArray(data.facets) ? data.facets : null;
+        const computedFacets = buildClipFacetSummaryFromImageTags(searchState.imageTags);
+        if (computedFacets.length) {
+            facetCache = computedFacets;
+        } else if (backendFacets && backendFacets.length) {
+            facetCache = backendFacets.map(facet => ({
+                tag: facet.tag,
+                norm: facet.norm,
+                kind: facet.kind,
+                freq: facet.freq,
+            }));
+        } else {
+            facetCache = [];
+        }
         renderFacets(facetCache);
         searchState.total = clipTotal;
         searchState.done = clipOffset >= clipTotal;
@@ -758,7 +1023,28 @@ async function runClipSearch(
                 autoObserver.observe(sentinel);
             }
         }
+
+        if (!append && updateHistory) {
+            const anchorIndexForHistory = scrollRestorePending && pendingScrollIndex !== null ? pendingScrollIndex : 0;
+            pushHistoryState({ query: lastQuery, detail: null, pos: anchorIndexForHistory, clip: clipToken ?? null });
+        }
+
+        if (clipModeActive && newImageIds.length) {
+            loadTagsForImageIds(newImageIds);
+        }
+
+        if (
+            scrollRestorePending &&
+            pendingScrollIndex !== null &&
+            pendingScrollIndex > 0 &&
+            searchState.images.length <= pendingScrollIndex &&
+            !searchState.done
+        ) {
+            queueMoreForScroll = true;
+        }
+
         updateStatus();
+        maybeOpenPendingDetail();
     } catch (err) {
         console.error(err);
         statusEl.textContent = 'CLIP search failed';
@@ -768,12 +1054,23 @@ async function runClipSearch(
         if (clipSearchClear) clipSearchClear.disabled = false;
         if (detailSimilarBtn) detailSimilarBtn.disabled = false;
         updateStatus();
+        if (scrollRestorePending) {
+            if (queueMoreForScroll && lastClipPayload) {
+                setTimeout(() => {
+                    runClipSearch(lastClipPayload, { append: true, updateHistory: false });
+                }, 0);
+            } else {
+                maybeRestoreScrollPosition();
+            }
+        } else if (!append) {
+            scheduleScrollSave();
+        }
     }
 }
 
 function rerunLastClipSearch() {
     if (lastClipPayload) {
-        runClipSearch(lastClipPayload, { append: false });
+        runClipSearch(lastClipPayload, { append: false, updateHistory: false });
     }
 }
 
@@ -876,7 +1173,8 @@ function scheduleScrollSave() {
             return;
         }
         lastAnchorIndex = anchorIndex;
-        pushHistoryState({ query: lastQuery, detail: activeDetail, pos: anchorIndex }, { replace: true });
+        const clipTokenForHistory = getActiveClipToken();
+        pushHistoryState({ query: lastQuery, detail: activeDetail, pos: anchorIndex, clip: clipTokenForHistory }, { replace: true });
     });
 }
 
@@ -943,15 +1241,15 @@ function commitSearch(rawValue, { pushHistory = true } = {}) {
     requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
     if (nextQuery === lastQuery) {
         if (pushHistory) {
-            pushHistoryState({ query: nextQuery, detail: null, pos: 0 }, { replace: true });
+            pushHistoryState({ query: nextQuery, detail: null, pos: 0, clip: null }, { replace: true });
         }
         return;
     }
     lastQuery = nextQuery;
     if (pushHistory) {
-        pushHistoryState({ query: nextQuery, detail: null, pos: 0 });
+        pushHistoryState({ query: nextQuery, detail: null, pos: 0, clip: null });
     } else {
-        pushHistoryState({ query: nextQuery, detail: null, pos: 0 }, { replace: true });
+        pushHistoryState({ query: nextQuery, detail: null, pos: 0, clip: null }, { replace: true });
     }
     fetchImages(true);
 }
@@ -1044,7 +1342,7 @@ document.getElementById('clear').addEventListener('click', () => {
 loadMoreBtn.addEventListener('click', () => {
     if (clipModeActive) {
         if (!searchState.loading && lastClipPayload) {
-            runClipSearch(lastClipPayload, { append: true });
+            runClipSearch(lastClipPayload, { append: true, updateHistory: false });
         }
     } else {
         fetchImages();
@@ -1054,11 +1352,11 @@ loadMoreBtn.addEventListener('click', () => {
 if (clipSearchButton) {
     clipSearchButton.addEventListener('click', () => {
         if (!clipEnabled) return;
-        const query = clipSearchInput ? clipSearchInput.value.trim() : '';
-        if (!query && lastClipPayload) {
+        const rawQuery = clipSearchInput ? clipSearchInput.value : '';
+        if (!rawQuery.trim() && lastClipPayload) {
             runClipSearch(lastClipPayload, { append: false });
         } else {
-            runClipSearch({ query, tagQuery: searchBox.value.trim() });
+            runClipSearch({ query: rawQuery, tagQuery: searchBox.value.trim() });
         }
     });
 }
@@ -1067,11 +1365,11 @@ if (clipSearchInput) {
         if (event.key === 'Enter') {
             event.preventDefault();
             if (!clipEnabled) return;
-            const query = clipSearchInput.value.trim();
-            if (!query && lastClipPayload) {
+            const rawQuery = clipSearchInput.value;
+            if (!rawQuery.trim() && lastClipPayload) {
                 runClipSearch(lastClipPayload, { append: false });
             } else {
-                runClipSearch({ query, tagQuery: searchBox.value.trim() });
+                runClipSearch({ query: rawQuery, tagQuery: searchBox.value.trim() });
             }
         }
     });
@@ -1081,19 +1379,23 @@ if (clipSearchInput) {
             clearTimeout(clipSearchTimer);
             clipSearchTimer = null;
         }
-        const query = clipSearchInput.value.trim();
-        if (!query) {
+        const rawQuery = clipSearchInput.value;
+        const trimmed = rawQuery.trim();
+        if (!trimmed) {
             if (clipModeActive && !searchState.loading) {
                 clipModeActive = false;
+                lastClipPayload = null;
+                currentClipToken = null;
                 clipOffset = 0;
                 clipTotal = 0;
+                pushHistoryState({ query: lastQuery, detail: null, pos: 0, clip: null }, { replace: true });
                 fetchImages(true);
             }
             return;
         }
         clipSearchTimer = setTimeout(() => {
             if (!searchState.loading) {
-                runClipSearch({ query, tagQuery: searchBox.value.trim() });
+                runClipSearch({ query: rawQuery, tagQuery: searchBox.value.trim() });
             }
         }, CLIP_SEARCH_DEBOUNCE);
     });
@@ -1102,10 +1404,23 @@ if (clipSearchClear) {
     clipSearchClear.addEventListener('click', () => {
         if (clipSearchInput) clipSearchInput.value = '';
         if (clipModeActive && !searchState.loading) {
+            if (detailOverlay.classList.contains('active')) {
+                closeDetail({ skipHistory: true });
+            }
             clipModeActive = false;
+            lastClipPayload = null;
+            currentClipToken = null;
             clipOffset = 0;
             clipTotal = 0;
+            pushHistoryState({ query: lastQuery, detail: null, pos: 0, clip: null });
             fetchImages(true);
+        } else {
+            clipModeActive = false;
+            lastClipPayload = null;
+            currentClipToken = null;
+            clipOffset = 0;
+            clipTotal = 0;
+            pushHistoryState({ clip: null }, { replace: true });
         }
     });
 }
@@ -1272,11 +1587,12 @@ async function openDetail(id, options = {}) {
         return;
     }
     const { pushState = true, replaceState = false } = options;
+    const clipTokenForHistory = getActiveClipToken();
     if (detailOverlay.classList.contains('active') && currentDetailId === detailId) {
         if (pushState) {
-            pushHistoryState({ query: lastQuery, detail: detailId }, { replace: true });
+            pushHistoryState({ query: lastQuery, detail: detailId, clip: clipTokenForHistory }, { replace: true });
         } else if (replaceState) {
-            pushHistoryState({ query: lastQuery, detail: detailId }, { replace: true });
+            pushHistoryState({ query: lastQuery, detail: detailId, clip: clipTokenForHistory }, { replace: true });
         }
         return;
     }
@@ -1303,16 +1619,9 @@ async function openDetail(id, options = {}) {
         if (item.seed) titleParts.push(`Seed ${item.seed}`);
         detailTitle.textContent = titleParts.join(' • ') || 'Image Details';
         detailImage.src = item.file_url;
-        if (item.width && item.height) {
-            const ratio = `${item.width} / ${item.height}`;
-            detailImage.parentElement.style.setProperty('--image-aspect', ratio);
-            detailImage.parentElement.style.aspectRatio = ratio;
-            detailImage.style.aspectRatio = ratio;
-        } else {
-            detailImage.parentElement.style.removeProperty('--image-aspect');
-            detailImage.parentElement.style.removeProperty('aspect-ratio');
-            detailImage.style.removeProperty('aspect-ratio');
-        }
+        detailImage.parentElement.style.removeProperty('--image-aspect');
+        detailImage.parentElement.style.removeProperty('aspect-ratio');
+        detailImage.style.removeProperty('aspect-ratio');
         detailInfo.innerHTML = `
             <h3>Info</h3>
             <div class="info-grid">
@@ -1341,9 +1650,9 @@ async function openDetail(id, options = {}) {
         detailOverlay.classList.add('active');
         const anchorIndexForHistory = scrollRestorePending && pendingScrollIndex !== null ? pendingScrollIndex : getAnchorIndex();
         if (pushState) {
-            pushHistoryState({ query: lastQuery, detail: detailId, pos: anchorIndexForHistory });
+            pushHistoryState({ query: lastQuery, detail: detailId, pos: anchorIndexForHistory, clip: clipTokenForHistory });
         } else if (replaceState) {
-            pushHistoryState({ query: lastQuery, detail: detailId, pos: anchorIndexForHistory }, { replace: true });
+            pushHistoryState({ query: lastQuery, detail: detailId, pos: anchorIndexForHistory, clip: clipTokenForHistory }, { replace: true });
         }
     } catch (err) {
         console.error(err);
@@ -1549,55 +1858,127 @@ function closeDetail({ skipHistory = false } = {}) {
     detailImage.style.removeProperty('aspect-ratio');
     if (!skipHistory) {
         const anchorIndexForHistory = scrollRestorePending && pendingScrollIndex !== null ? pendingScrollIndex : getAnchorIndex();
-        pushHistoryState({ query: lastQuery, detail: null, pos: anchorIndexForHistory });
+        const clipTokenForHistory = getActiveClipToken();
+        pushHistoryState({ query: lastQuery, detail: null, pos: anchorIndexForHistory, clip: clipTokenForHistory });
     }
 }
 
 function handleHistoryState(state) {
-    const safeState = state || { query: '', detail: null, pos: 0 };
+    const safeState = state || { query: '', detail: null, pos: 0, clip: null };
     const nextQuery = (safeState.query || '').trim();
     const nextDetail = normalizeDetail(safeState.detail);
     const nextPos = normalizeIndex(safeState.pos);
+    const nextClipToken = typeof safeState.clip === 'string' && safeState.clip ? safeState.clip : null;
+    const normalizedCurrentClip = currentClipToken || null;
+    const clipChanged = nextClipToken !== normalizedCurrentClip;
+    const queryChanged = nextQuery !== lastQuery;
+    const targetDetail = nextDetail;
+
     currentHistoryState = {
         query: nextQuery,
         detail: nextDetail,
         pos: nextPos ?? 0,
+        clip: nextClipToken,
     };
+
     if (searchBox.value !== nextQuery) {
         searchBox.value = nextQuery;
     }
-    const queryChanged = nextQuery !== lastQuery;
-    if (queryChanged) {
-        lastQuery = nextQuery;
-        closeDetail({ skipHistory: true });
-        pendingDetailId = nextDetail;
-        pendingScrollIndex = nextPos !== null ? nextPos : 0;
-        lastAnchorIndex = pendingScrollIndex;
-        scrollRestorePending = true;
-        fetchImages(true);
-        return;
-    }
-    pendingDetailId = nextDetail;
-    if (nextPos !== null) {
-        pendingScrollIndex = nextPos;
-    } else {
-        pendingScrollIndex = 0;
-    }
+
+    pendingDetailId = targetDetail;
+    pendingScrollIndex = nextPos !== null ? nextPos : 0;
     lastAnchorIndex = pendingScrollIndex;
     scrollRestorePending = true;
-    if (nextDetail === null) {
-        closeDetail({ skipHistory: true });
-        if (!searchState.images.length && !searchState.loading) {
-            fetchImages(true);
+
+    if (nextClipToken) {
+        const clipPayload = buildClipPayloadFromToken(nextClipToken, nextQuery);
+        if (!clipPayload) {
+            clipModeActive = false;
+            lastClipPayload = null;
+            currentClipToken = null;
+            clipOffset = 0;
+            clipTotal = 0;
+            if (clipSearchInput) clipSearchInput.value = '';
+            pushHistoryState({ clip: null }, { replace: true });
+        } else {
+            const wasClipMode = clipModeActive;
+            clipModeActive = true;
+            currentClipToken = nextClipToken;
+            lastQuery = nextQuery;
+            if (clipSearchInput) {
+                clipSearchInput.value = clipPayload.updateInput || '';
+            }
+
+            if (targetDetail === null && detailOverlay.classList.contains('active')) {
+                closeDetail({ skipHistory: true });
+                pendingDetailId = targetDetail;
+            }
+
+            const needFreshFetch = clipChanged || queryChanged || !wasClipMode || !searchState.images.length;
+            if (needFreshFetch) {
+                if (detailOverlay.classList.contains('active')) {
+                    closeDetail({ skipHistory: true });
+                }
+                pendingDetailId = targetDetail;
+                runClipSearch(clipPayload, { append: false, updateHistory: false });
+                return;
+            }
+
+            if (targetDetail !== null) {
+                if (!detailOverlay.classList.contains('active') || currentDetailId !== targetDetail) {
+                    pendingDetailId = targetDetail;
+                    maybeOpenPendingDetail();
+                }
+            }
+
+            if (!searchState.images.length && !searchState.loading) {
+                runClipSearch(clipPayload, { append: false, updateHistory: false });
+                return;
+            }
+
+            if (scrollRestorePending) {
+                if (pendingScrollIndex !== null && pendingScrollIndex >= searchState.images.length && !searchState.done && !searchState.loading) {
+                    const payloadForAppend = lastClipPayload || clipPayload;
+                    runClipSearch(payloadForAppend, { append: !!lastClipPayload, updateHistory: false });
+                    return;
+                }
+                maybeRestoreScrollPosition();
+            }
+            return;
         }
+    } else if (clipModeActive || currentClipToken) {
+        clipModeActive = false;
+        lastClipPayload = null;
+        currentClipToken = null;
+        clipOffset = 0;
+        clipTotal = 0;
+        if (clipSearchInput) clipSearchInput.value = '';
+    }
+
+    if (targetDetail === null && detailOverlay.classList.contains('active')) {
+        closeDetail({ skipHistory: true });
+        pendingDetailId = targetDetail;
+    }
+
+    if (queryChanged) {
+        lastQuery = nextQuery;
+        fetchImages(true);
         return;
     }
-    if (!detailOverlay.classList.contains('active') || currentDetailId !== nextDetail) {
-        maybeOpenPendingDetail();
-    }
+
     if (!searchState.images.length && !searchState.loading) {
         fetchImages(true);
-    } else if (scrollRestorePending) {
+        return;
+    }
+
+    if (targetDetail !== null) {
+        if (!detailOverlay.classList.contains('active') || currentDetailId !== targetDetail) {
+            pendingDetailId = targetDetail;
+            maybeOpenPendingDetail();
+        }
+    }
+
+    if (scrollRestorePending) {
         if (pendingScrollIndex !== null && pendingScrollIndex >= searchState.images.length && !searchState.done && !searchState.loading) {
             fetchImages();
         } else {
@@ -1607,21 +1988,23 @@ function handleHistoryState(state) {
 }
 
 const initialState = parseStateFromLocation();
-lastQuery = initialState.query;
-if (searchBox.value !== initialState.query) {
-    searchBox.value = initialState.query;
+const normalizedInitialState = {
+    query: (initialState.query || '').trim(),
+    detail: normalizeDetail(initialState.detail),
+    pos: normalizeIndex(initialState.pos) ?? 0,
+    clip: typeof initialState.clip === 'string' && initialState.clip ? initialState.clip : null,
+};
+lastQuery = normalizedInitialState.query;
+if (searchBox.value !== lastQuery) {
+    searchBox.value = lastQuery;
 }
-pendingDetailId = initialState.detail;
-pendingScrollIndex = initialState.pos !== null ? initialState.pos : 0;
+pendingDetailId = normalizedInitialState.detail;
+pendingScrollIndex = normalizedInitialState.pos;
 scrollRestorePending = pendingScrollIndex > 0;
 lastAnchorIndex = pendingScrollIndex;
-currentHistoryState = {
-    query: lastQuery,
-    detail: normalizeDetail(pendingDetailId),
-    pos: pendingScrollIndex,
-};
-pushHistoryState({ query: lastQuery, detail: pendingDetailId, pos: pendingScrollIndex }, { replace: true });
-fetchImages(true);
+currentHistoryState = { ...normalizedInitialState };
+pushHistoryState(normalizedInitialState, { replace: true });
+handleHistoryState({ ...normalizedInitialState });
 
 window.addEventListener('popstate', (event) => {
     handleHistoryState(event.state || parseStateFromLocation());
@@ -1633,7 +2016,7 @@ if ('IntersectionObserver' in window) {
             if (entry.isIntersecting) {
                 if (clipModeActive) {
                     if (!searchState.loading && !searchState.done && lastClipPayload) {
-                        runClipSearch(lastClipPayload, { append: true });
+                        runClipSearch(lastClipPayload, { append: true, updateHistory: false });
                     }
                 } else {
                     fetchImages();
