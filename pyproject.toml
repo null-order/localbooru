@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "localbooru"
+version = "0.1.0"
+description = "Gallery and search for your memes and AI slop"
+authors = [{name = "Null", email = "null@nullorder.net"}]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pillow",
+]
+
+[project.optional-dependencies]
+clip = [
+  "open_clip_torch",
+  "torch",
+]
+ui = [
+  "pywebview",
+]
+
+[project.scripts]
+localbooru = "localbooru.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["localbooru*"]
