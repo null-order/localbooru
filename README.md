@@ -33,11 +33,27 @@ Launching without `--no-ui` will attempt to open a frameless `pywebview` window 
 
 ### Required dependencies
 
-Runtime now expects CPU builds of PyTorch, OpenCLIP, and PyWebView. Install them once (before or after `pip install localbooru`):
+`localbooru` now expects PyTorch, OpenCLIP, and PyWebView to be present at runtime. Install **one** of the following stacks before (or after) installing the package:
 
-```bash
-export PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
-pip install --break-system-packages torch open_clip_torch pywebview
-```
+- **CPU-only** (works everywhere):
+  ```bash
+  export PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
+  pip install --break-system-packages torch open_clip_torch pywebview
+  ```
+- **NVIDIA CUDA** (replace `cu121` with the desired CUDA version):
+  ```bash
+  pip install --break-system-packages \
+      torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+  pip install --break-system-packages open_clip_torch pywebview
+  ```
+- **AMD ROCm** (install ROCm, then grab the matching wheels):
+  ```bash
+  pip install --break-system-packages torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.1
+  pip install --break-system-packages open_clip_torch pywebview
+  ```
+- **Apple Silicon (MPS)**:
+  ```bash
+  pip install --break-system-packages torch torchvision open_clip_torch pywebview
+  ```
 
-`localbooru` will raise an explicit error if any of these modules are missing at startup.
+If any of these modules are missing at startup, the CLI will fail fast with an explanatory error.
