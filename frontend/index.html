@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>LocalBooru</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0;
+        color: #e2e8f0;
+        background: #0f172a;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+      }
+      .container {
+        padding: 2rem;
+        background: rgba(15, 23, 42, 0.8);
+        border-radius: 16px;
+        box-shadow: 0 16px 40px rgba(8, 47, 73, 0.4);
+        max-width: 680px;
+        width: 90%;
+        text-align: center;
+      }
+      h1 {
+        margin-bottom: 1rem;
+        font-size: 2.5rem;
+        color: #67e8f9;
+      }
+      pre {
+        background: rgba(15, 23, 42, 0.6);
+        padding: 1rem;
+        border-radius: 12px;
+        overflow: auto;
+      }
+      .status {
+        margin-top: 2rem;
+        font-size: 0.95rem;
+        color: #bae6fd;
+      }
+      .progress-wrap {
+        position: relative;
+        width: 100%;
+        height: 14px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.25);
+        overflow: hidden;
+        margin: 12px 0 16px;
+      }
+      .progress-bar {
+        position: absolute;
+        inset: 0;
+        width: 0;
+        background: linear-gradient(90deg, #22d3ee, #0ea5e9);
+        border-radius: inherit;
+        transition: width 0.3s ease;
+      }
+      .progress-bar::after {
+        content: attr(data-label);
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: 11px;
+        color: rgba(15, 23, 42, 0.85);
+        font-weight: 600;
+      }
+      .toggle-btn {
+        margin-top: 8px;
+        border: none;
+        border-radius: 999px;
+        padding: 8px 16px;
+        background: rgba(14, 197, 255, 0.18);
+        color: #67e8f9;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .toggle-btn:hover {
+        background: rgba(14, 197, 255, 0.28);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="container">
+      <h1>LocalBooru</h1>
+      <p>The integrated NovelAI gallery + CLIP search UI is coming soon.</p>
+      <p>Keep this window open; the backend is running in the background.</p>
+      <section class="status">
+        <h2>CLIP Indexing Status</h2>
+        <div class="progress-wrap">
+          <div class="progress-bar" id="clip-progress"></div>
+        </div>
+        <p id="clip-summary">Loading…</p>
+        <button id="clip-toggle" class="toggle-btn" hidden>Pause</button>
+        <pre id="clip-detail">Waiting…</pre>
+      </section>
+    </main>
+    <script>
+      const summary = document.getElementById('clip-summary');
+      const detail = document.getElementById('clip-detail');
+      const progressBar = document.getElementById('clip-progress');
+      const toggleBtn = document.getElementById('clip-toggle');
+
+      async function pollStatus() {
+        try {
+          const res = await fetch('/api/status/clip');
+          if (!res.ok) throw new Error('status ' + res.status);
+          const data = await res.json();
+          const total = data.total || 0;
+          const completed = data.completed || 0;
+          const processing = data.processing || 0;
+          const queued = data.queued || Math.max(total - completed - processing, 0);
+          const percent = total ? Math.round((completed / total) * 100) : 0;
+          progressBar.style.width = `${percent}%`;
+          progressBar.dataset.label = `${percent}%`;
+          summary.textContent = `State: ${data.state} • Completed ${completed}/${total} • Processing ${processing} • Queued ${queued}`;
+          detail.textContent = JSON.stringify(data, null, 2);
+          toggleBtn.hidden = !total;
+          toggleBtn.textContent = data.state === 'paused' ? 'Resume' : 'Pause';
+          toggleBtn.dataset.state = data.state;
+        } catch (err) {
+          summary.textContent = 'Unable to load status: ' + err.message;
+        }
+      }
+      async function toggleClip() {
+        const state = toggleBtn.dataset.state;
+        const target = state === 'paused' ? 'resume' : 'pause';
+        try {
+          const res = await fetch(`/api/clip/${target}`, { method: 'POST' });
+          if (!res.ok) throw new Error(res.statusText);
+          setTimeout(pollStatus, 200);
+        } catch (err) {
+          summary.textContent = 'Unable to toggle: ' + err.message;
+        }
+      }
+      toggleBtn.addEventListener('click', toggleClip);
+      setInterval(pollStatus, 2000);
+      pollStatus();
+    </script>
+  </body>
+</html>

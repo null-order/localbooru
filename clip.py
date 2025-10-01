@@ -1,0 +1,223 @@
+"""CLIP embedding management for localbooru."""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Dict, Optional
+
+from PIL import Image, UnidentifiedImageError
+
+from .config import LocalBooruConfig
+from .database import LocalBooruDatabase
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class ClipProgress:
+    model_key: str
+    total: int = 0
+    completed: int = 0
+    processing: int = 0
+    queued: int = 0
+    current_path: Optional[str] = None
+    started_at: Optional[float] = None
+    last_update: Optional[float] = None
+    paused: bool = False
+    errors: list[str] = field(default_factory=list)
+
+    def snapshot(self, db: Optional[LocalBooruDatabase] = None) -> Dict[str, object]:
+        data = asdict(self)
+        if db is not None:
+            total, completed, processing = db.clip_progress_counts(self.model_key)
+            data.update({"total": total, "completed": completed, "processing": processing})
+            data["queued"] = max(total - completed - processing, 0)
+        data["timestamp"] = time.time()
+        if self.paused:
+            state = "paused"
+        elif data["queued"] or data["processing"]:
+            state = "running"
+        else:
+            state = "idle"
+        data["state"] = state
+        data["error_sample"] = self.errors[-5:]
+        return data
+
+
+class ClipIndexer(threading.Thread):
+    def __init__(self, db: LocalBooruDatabase, config: LocalBooruConfig, progress: ClipProgress):
+        super().__init__(daemon=True)
+        self.db = db
+        self.config = config
+        self.progress = progress
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._pause_event.set()  # running by default
+        self._model = None
+
+    def run(self) -> None:  # pragma: no cover - background thread
+        while not self._stop_event.is_set():
+            if not self._pause_event.is_set():
+                self.progress.paused = True
+                time.sleep(0.5)
+                continue
+            self.progress.paused = False
+            processed_any = self._process_batch()
+            if not processed_any:
+                time.sleep(2.0)
+
+    def process_until_empty(self) -> None:
+        while self._process_batch():
+            continue
+
+    def _process_batch(self) -> bool:
+        if not self.config.clip_enabled:
+            return False
+        batch = self.db.reserve_clip_batch(self.progress.model_key, self.config.clip_batch_size)
+        if not batch:
+            self._refresh_progress()
+            self.progress.processing = 0
+            if self.progress.started_at and self.progress.completed >= self.progress.total:
+                self.progress.current_path = None
+            return False
+
+        self.progress.started_at = self.progress.started_at or time.time()
+        images = []
+        image_ids = []
+        paths: list[str] = []
+
+        for row in batch:
+            rel_path = row["path"]
+            abs_path = (self.config.root / rel_path) if not Path(rel_path).is_absolute() else Path(rel_path)
+            try:
+                img = Image.open(abs_path).convert("RGB")
+            except FileNotFoundError:
+                LOGGER.warning("Missing file for CLIP embedding: %s", abs_path)
+                self.db.mark_clip_error(row["image_id"], "file missing")
+                self._record_error(f"Missing file: {abs_path}")
+                continue
+            except UnidentifiedImageError:
+                LOGGER.warning("Unidentified image for CLIP embedding: %s", abs_path)
+                self.db.mark_clip_error(row["image_id"], "cannot identify image")
+                self._record_error(f"Unidentified image: {abs_path}")
+                continue
+            except Exception as exc:
+                LOGGER.exception("Error opening %s: %s", abs_path, exc)
+                self.db.mark_clip_error(row["image_id"], str(exc))
+                self._record_error(f"Open error: {abs_path}: {exc}")
+                continue
+            images.append(img)
+            image_ids.append(row["image_id"])
+            paths.append(str(abs_path))
+
+        if not images:
+            self._refresh_progress()
+            return True
+
+        self.progress.processing = len(image_ids)
+
+        try:
+            model = self._get_model()
+            vectors = model.compute_image_features(images)
+        except Exception as exc:
+            LOGGER.exception("Failed to compute CLIP vectors: %s", exc)
+            for image_id in image_ids:
+                self.db.mark_clip_error(image_id, "model failure")
+            self._record_error(f"Model failure: {exc}")
+            self._refresh_progress()
+            return True
+
+        try:
+            import numpy as np  # local import to keep dependency optional when CLIP disabled
+        except ImportError as exc:
+            LOGGER.error("numpy is required for CLIP embeddings: %s", exc)
+            for image_id in image_ids:
+                self.db.mark_clip_error(image_id, "numpy missing")
+            self._record_error("numpy missing")
+            self._refresh_progress()
+            return True
+
+        for image_id, vec, path in zip(image_ids, vectors, paths):
+            self.progress.current_path = path
+            try:
+                vector_bytes = np.asarray(vec, dtype=np.float32).tobytes()
+                self.db.store_clip_vector(image_id, self.progress.model_key, vector_bytes)
+            except Exception as exc:
+                LOGGER.exception("Failed to store CLIP vector for %s: %s", path, exc)
+                self.db.mark_clip_error(image_id, "db failure")
+                self._record_error(f"DB failure {path}: {exc}")
+
+        for img in images:
+            try:
+                img.close()
+            except Exception:  # pragma: no cover - best effort cleanup
+                pass
+
+        self._refresh_progress()
+        return True
+
+    def _get_model(self):
+        if self._model is None:
+            self._model = _OpenClipModel(
+                model_name=self.config.clip_model_name,
+                checkpoint=self.config.clip_checkpoint,
+                device=self.config.clip_device,
+            )
+        return self._model
+
+    def _refresh_progress(self) -> None:
+        total, completed, processing = self.db.clip_progress_counts(self.progress.model_key)
+        self.progress.total = total
+        self.progress.completed = completed
+        self.progress.processing = processing
+        self.progress.queued = max(total - completed - processing, 0)
+        self.progress.last_update = time.time()
+
+    def pause(self) -> None:
+        self._pause_event.clear()
+
+    def resume(self) -> None:
+        self._pause_event.set()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._pause_event.set()
+
+    def join(self, timeout: Optional[float] = None) -> None:
+        super().join(timeout)
+
+    def _record_error(self, message: str) -> None:
+        self.progress.errors.append(message)
+        if len(self.progress.errors) > 20:
+            self.progress.errors.pop(0)
+
+
+class _OpenClipModel:
+    """Lazy wrapper around open_clip for computing image features."""
+
+    def __init__(self, model_name: str, checkpoint: str, device: str):
+        try:
+            import open_clip
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError("open_clip_torch is required for CLIP indexing") from exc
+
+        self._device = device
+        self._model, _, self._preprocess = open_clip.create_model_and_transforms(
+            model_name,
+            pretrained=checkpoint,
+            device=device,
+        )
+
+    def compute_image_features(self, images: list[Image.Image]) -> np.ndarray:
+        import torch
+        import numpy as np
+
+        tensors = torch.stack([self._preprocess(img) for img in images]).to(self._device)
+        with torch.no_grad():
+            image_features = self._model.encode_image(tensors)
+            image_features /= image_features.norm(dim=-1, keepdim=True)
+        result = image_features.cpu().numpy().astype(np.float32)
+        return result
