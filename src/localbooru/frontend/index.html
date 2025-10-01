@@ -298,6 +298,8 @@ const searchState = {
 let clipEnabled = true;
 let clipModeActive = false;
 let lastClipPayload = null;
+let clipTotal = 0;
+let clipOffset = 0;
 
 let currentDetailId = null;
 let currentDetailIndex = -1;
@@ -309,6 +311,8 @@ let currentHotspotCenters = null;
 let currentHotspotDots = [];
 let lastQuery = '';
 let pendingDetailId = null;
+let clipSearchTimer = null;
+const CLIP_SEARCH_DEBOUNCE = 400;
 let clipSearchTimer = null;
 const CLIP_SEARCH_DEBOUNCE = 400;
 
@@ -548,6 +552,8 @@ function resetState(query, { clearClip = true } = {}) {
     if (clearClip) {
         clipModeActive = false;
         lastClipPayload = null;
+        clipOffset = 0;
+        clipTotal = 0;
     }
     searchState.query = query;
     searchState.images = [];
@@ -635,7 +641,10 @@ async function fetchImages(reset=false) {
     }
 }
 
-async function runClipSearch({ query = '', positiveImages = [], negativeImages = [], tagQuery = searchBox.value.trim(), updateInput } = {}) {
+async function runClipSearch(
+    { query = '', positiveImages = [], negativeImages = [], tagQuery = searchBox.value.trim(), updateInput } = {},
+    { append = false } = {}
+) {
     if (!clipEnabled) {
         statusEl.textContent = 'CLIP disabled';
         return;
@@ -647,6 +656,7 @@ async function runClipSearch({ query = '', positiveImages = [], negativeImages =
         clearTimeout(clipSearchTimer);
         clipSearchTimer = null;
     }
+
     const trimmedQuery = (query || '').trim();
     const posIds = Array.isArray(positiveImages) ? positiveImages.map(Number).filter(Number.isFinite) : [];
     const negIds = Array.isArray(negativeImages) ? negativeImages.map(Number).filter(Number.isFinite) : [];
@@ -659,18 +669,37 @@ async function runClipSearch({ query = '', positiveImages = [], negativeImages =
     } else if (trimmedQuery && clipSearchInput) {
         clipSearchInput.value = trimmedQuery;
     }
+
     clipModeActive = true;
+    if (!append) {
+        clipOffset = 0;
+        clipTotal = 0;
+        resetState(lastQuery, { clearClip: false });
+        if (autoObserver) {
+            autoObserver.unobserve(sentinel);
+        }
+    } else {
+        statusEl.textContent = 'Loading clip results…';
+    }
+
     searchState.loading = true;
+    if (!append) {
+        statusEl.textContent = 'CLIP search…';
+    }
     if (detailSimilarBtn) detailSimilarBtn.disabled = true;
-    statusEl.textContent = 'CLIP search…';
     if (clipSearchButton) clipSearchButton.disabled = true;
     if (clipSearchClear) clipSearchClear.disabled = true;
-    const payload = { limit: PAGE_SIZE };
+
+    const payload = {
+        limit: PAGE_SIZE,
+        offset: append ? clipOffset : 0,
+    };
     const tagFilter = (tagQuery || '').trim();
     if (tagFilter) payload.tag_query = tagFilter;
     if (trimmedQuery) payload.query = trimmedQuery;
     if (posIds.length) payload.positive_images = posIds;
     if (negIds.length) payload.negative_images = negIds;
+
     lastClipPayload = {
         query: trimmedQuery,
         positiveImages: posIds.slice(),
@@ -678,6 +707,7 @@ async function runClipSearch({ query = '', positiveImages = [], negativeImages =
         tagQuery: tagFilter,
         updateInput: updateInput !== undefined ? updateInput : (trimmedQuery ? trimmedQuery : (posIds.length ? `image:${posIds[0]}` : ''))
     };
+
     try {
         const res = await fetch('/api/search/clip', {
             method: 'POST',
@@ -686,15 +716,16 @@ async function runClipSearch({ query = '', positiveImages = [], negativeImages =
         });
         if (!res.ok) throw new Error(`clip search failed: ${res.status}`);
         const data = await res.json();
-        resetState(lastQuery, { clearClip: false });
-        searchState.images = [];
-        searchState.index = new Map();
-        searchState.imageTags = new Map();
-        gridEl.innerHTML = '';
-        if (autoObserver) {
-            autoObserver.unobserve(sentinel);
-        }
         const results = Array.isArray(data.results) ? data.results : [];
+
+        if (!append) {
+            gridEl.innerHTML = '';
+            searchState.images = [];
+            searchState.index = new Map();
+            searchState.imageTags = new Map();
+            requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
+        }
+
         results.forEach(item => {
             const idx = searchState.images.length;
             searchState.images.push(item);
@@ -706,12 +737,22 @@ async function runClipSearch({ query = '', positiveImages = [], negativeImages =
             registerCardElement(cardEl, item);
             gridEl.appendChild(cardEl);
         });
+
+        clipTotal = data.total ?? clipTotal ?? 0;
+        clipOffset += results.length;
+
         facetCache = [];
         renderFacets(facetCache);
-        searchState.total = data.total || results.length;
-        searchState.done = true;
-        loadMoreBtn.style.display = 'none';
-        requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
+        searchState.total = clipTotal;
+        searchState.done = clipOffset >= clipTotal;
+
+        loadMoreBtn.style.display = searchState.done ? 'none' : 'block';
+        if (autoObserver) {
+            autoObserver.unobserve(sentinel);
+            if (!searchState.done) {
+                autoObserver.observe(sentinel);
+            }
+        }
         updateStatus();
     } catch (err) {
         console.error(err);
@@ -727,7 +768,7 @@ async function runClipSearch({ query = '', positiveImages = [], negativeImages =
 
 function rerunLastClipSearch() {
     if (lastClipPayload) {
-        runClipSearch(lastClipPayload);
+        runClipSearch(lastClipPayload, { append: false });
     }
 }
 
@@ -995,14 +1036,22 @@ document.getElementById('clear').addEventListener('click', () => {
     commitSearch('');
 });
 
-loadMoreBtn.addEventListener('click', () => fetchImages());
+loadMoreBtn.addEventListener('click', () => {
+    if (clipModeActive) {
+        if (!searchState.loading && lastClipPayload) {
+            runClipSearch(lastClipPayload, { append: true });
+        }
+    } else {
+        fetchImages();
+    }
+});
 
 if (clipSearchButton) {
     clipSearchButton.addEventListener('click', () => {
         if (!clipEnabled) return;
         const query = clipSearchInput ? clipSearchInput.value.trim() : '';
         if (!query && lastClipPayload) {
-            runClipSearch(lastClipPayload);
+            runClipSearch(lastClipPayload, { append: false });
         } else {
             runClipSearch({ query, tagQuery: searchBox.value.trim() });
         }
@@ -1015,7 +1064,7 @@ if (clipSearchInput) {
             if (!clipEnabled) return;
             const query = clipSearchInput.value.trim();
             if (!query && lastClipPayload) {
-                runClipSearch(lastClipPayload);
+                runClipSearch(lastClipPayload, { append: false });
             } else {
                 runClipSearch({ query, tagQuery: searchBox.value.trim() });
             }
@@ -1031,6 +1080,8 @@ if (clipSearchInput) {
         if (!query) {
             if (clipModeActive && !searchState.loading) {
                 clipModeActive = false;
+                clipOffset = 0;
+                clipTotal = 0;
                 fetchImages(true);
             }
             return;
@@ -1045,7 +1096,10 @@ if (clipSearchInput) {
 if (clipSearchClear) {
     clipSearchClear.addEventListener('click', () => {
         if (clipSearchInput) clipSearchInput.value = '';
-        if (clipModeActive) {
+        if (clipModeActive && !searchState.loading) {
+            clipModeActive = false;
+            clipOffset = 0;
+            clipTotal = 0;
             fetchImages(true);
         }
     });
@@ -1572,7 +1626,13 @@ if ('IntersectionObserver' in window) {
     autoObserver = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
             if (entry.isIntersecting) {
-                fetchImages();
+                if (clipModeActive) {
+                    if (!searchState.loading && !searchState.done && lastClipPayload) {
+                        runClipSearch(lastClipPayload, { append: true });
+                    }
+                } else {
+                    fetchImages();
+                }
             }
         });
     }, { rootMargin: '600px 0px' });

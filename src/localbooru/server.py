@@ -301,10 +301,15 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         negative_images = payload.get("negative_images") or []
         tag_query = payload.get("tag_query") or ""
         limit = payload.get("limit") or 20
+        offset = payload.get("offset") or 0
         try:
             limit = max(1, min(int(limit), 200))
         except (ValueError, TypeError):
             limit = 20
+        try:
+            offset = max(0, int(offset))
+        except (ValueError, TypeError):
+            offset = 0
 
         positive_queries = []
         if isinstance(query, str) and query.strip():
@@ -327,7 +332,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
 
-        results = perform_clip_search(
+        full_results = perform_clip_search(
             db=db,
             config=config,
             positive_text=positive_queries,
@@ -338,11 +343,14 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             restrict_to_ids=restrict_ids,
         )
 
-        if not results:
-            self._send_json({"results": [], "total": 0})
+        total = len(full_results)
+        window = full_results[offset: offset + limit] if limit else full_results[offset:]
+
+        if not window:
+            self._send_json({"results": [], "total": total, "offset": offset, "limit": limit})
             return
 
-        image_ids = [image_id for image_id, _score in results]
+        image_ids = [image_id for image_id, _score in window]
         conn = db.new_connection()
         try:
             placeholders = ",".join("?" for _ in image_ids)
@@ -354,7 +362,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
 
         row_map = {row["id"]: row for row in rows}
         payload_results = []
-        for image_id, score in results:
+        for image_id, score in window:
             row = row_map.get(image_id)
             if row is None:
                 continue
@@ -377,7 +385,12 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 }
             )
 
-        self._send_json({"results": payload_results, "total": len(payload_results)})
+        self._send_json({
+            "results": payload_results,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        })
 
     def _lookup_image_path(self, image_id: int) -> Optional[str]:
         db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
