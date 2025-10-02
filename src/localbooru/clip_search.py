@@ -31,6 +31,7 @@ def perform_clip_search(
     negative_images: Sequence[int | str] | None = None,
     limit: int = 20,
     restrict_to_ids: Iterable[int] | None = None,
+    positive_vectors: Sequence[object] | None = None,
 ) -> List[Tuple[int, float]]:
     try:
         import numpy as np
@@ -43,8 +44,15 @@ def perform_clip_search(
     negative_text = [q for q in (negative_text or []) if q]
     positive_ids = _normalize_ids(positive_images or [])
     negative_ids = _normalize_ids(negative_images or [])
+    positive_vector_list = list(positive_vectors or [])
 
-    if not positive_text and not negative_text and not positive_ids and not negative_ids:
+    if (
+        not positive_text
+        and not negative_text
+        and not positive_ids
+        and not negative_ids
+        and not positive_vector_list
+    ):
         return []
 
     vectors_positive: List[np.ndarray] = []
@@ -72,6 +80,18 @@ def perform_clip_search(
                 pos_vectors.append(vec)
         if pos_vectors:
             vectors_positive.append(np.stack(pos_vectors, axis=0).mean(axis=0))
+
+    if positive_vector_list:
+        for vector in positive_vector_list:
+            if vector is None:
+                continue
+            arr = np.asarray(vector, dtype=np.float32)
+            if arr.size == 0:
+                continue
+            norm = np.linalg.norm(arr)
+            if not np.isfinite(norm) or norm == 0:
+                continue
+            vectors_positive.append(arr / norm)
 
     if negative_ids:
         neg_vectors: List[np.ndarray] = []

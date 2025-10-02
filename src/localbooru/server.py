@@ -1,7 +1,11 @@
 """HTTP server for localbooru."""
 from __future__ import annotations
 
+import base64
+import binascii
+import cgi
 import hashlib
+import io
 import json
 import logging
 import mimetypes
@@ -16,7 +20,9 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from email.utils import formatdate
 
-from .clip import ClipIndexer, ClipProgress
+import numpy as np
+
+from .clip import ClipIndexer, ClipProgress, get_clip_model
 from .clip_search import perform_clip_search
 from .config import LocalBooruConfig
 from .database import LocalBooruDatabase
@@ -103,6 +109,74 @@ def summarize_facets_from_tag_map(
 
 class LocalBooruRequestHandler(BaseHTTPRequestHandler):
     server_version = "LocalBooru/0.1"
+
+    def _build_clip_response(
+        self,
+        window: List[Tuple[int, float]],
+        total: int,
+        offset: int,
+        limit: int,
+        *,
+        include_tags: bool,
+    ) -> Dict[str, object]:
+        if not window:
+            return {
+                "results": [],
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "facets": [],
+            }
+
+        image_ids = [image_id for image_id, _score in window]
+        db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
+        conn = db.new_connection()
+        tag_map: Dict[int, List[Dict[str, object]]] = {}
+        try:
+            placeholders = ",".join("?" for _ in image_ids)
+            sql = f"SELECT * FROM images WHERE id IN ({placeholders})"
+            rows = conn.execute(sql, tuple(image_ids)).fetchall()
+            if include_tags:
+                tag_map = fetch_tags_for_images(conn, image_ids)
+        finally:
+            conn.close()
+
+        row_map = {row["id"]: row for row in rows}
+        payload_results: List[Dict[str, object]] = []
+        for image_id, score in window:
+            row = row_map.get(image_id)
+            if row is None:
+                continue
+            payload_results.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "path": row["path"],
+                    "file_url": self.file_url_for(row["id"], row["path"]),
+                    "thumb_url": self.thumb_url_for(row["id"], row["path"]),
+                    "width": row["width"],
+                    "height": row["height"],
+                    "seed": row["seed"],
+                    "model": row["model"] or row["source"],
+                    "description": row["description"],
+                    "mtime": row["mtime"],
+                    "size": row["size"],
+                    "score": score,
+                    "tags": tag_map.get(row["id"], []) if include_tags else [],
+                }
+            )
+
+        facets_payload = (
+            summarize_facets_from_tag_map(tag_map) if include_tags else []
+        )
+
+        return {
+            "results": payload_results,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "facets": facets_payload,
+        }
 
     def do_GET(self) -> None:  # pragma: no cover - network path
         parsed = urllib.parse.urlparse(self.path)
@@ -389,6 +463,29 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
         config: LocalBooruConfig = self.server.config  # type: ignore[attr-defined]
 
+        positive_vectors: List[np.ndarray] = []
+        positive_vector_payload = payload.get("positive_vector")
+        if isinstance(positive_vector_payload, list):
+            vector_strings = positive_vector_payload
+        elif isinstance(positive_vector_payload, str):
+            vector_strings = [positive_vector_payload]
+        else:
+            vector_strings = []
+        for vector_str in vector_strings:
+            if not isinstance(vector_str, str) or not vector_str:
+                continue
+            try:
+                decoded = base64.b64decode(vector_str)
+            except (binascii.Error, ValueError):  # type: ignore[name-defined]
+                continue
+            arr = np.frombuffer(decoded, dtype=np.float32)
+            if arr.size == 0:
+                continue
+            norm = np.linalg.norm(arr)
+            if not np.isfinite(norm) or norm == 0:
+                continue
+            positive_vectors.append(arr / norm)
+
         restrict_ids = None
         if isinstance(tag_query, str) and tag_query.strip():
             conn = db.new_connection()
@@ -407,61 +504,135 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             negative_images=negative_images if isinstance(negative_images, list) else [],
             limit=0,
             restrict_to_ids=restrict_ids,
+            positive_vectors=positive_vectors or None,
         )
 
         total = len(full_results)
         window = full_results[offset: offset + limit] if limit else full_results[offset:]
+        payload = self._build_clip_response(
+            window,
+            total,
+            offset,
+            limit,
+            include_tags=include_tags,
+        )
+        self._send_json(payload)
 
-        if not window:
-            self._send_json({"results": [], "total": total, "offset": offset, "limit": limit})
+    def _handle_clip_search_file(self) -> None:
+        config: LocalBooruConfig = self.server.config  # type: ignore[attr-defined]
+        if not getattr(config, "clip_enabled", False):
+            self.send_error(HTTPStatus.BAD_REQUEST, "CLIP indexing disabled")
             return
 
-        image_ids = [image_id for image_id, _score in window]
-        conn = db.new_connection()
-        tag_map: Dict[int, List[Dict[str, object]]] = {}
+        content_type = self.headers.get("Content-Type", "")
+        ctype, pdict = cgi.parse_header(content_type)
+        if ctype != "multipart/form-data" or "boundary" not in pdict:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Expected multipart form data")
+            return
+
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": content_type,
+        }
+        form = cgi.FieldStorage(  # type: ignore[arg-type]
+            fp=self.rfile,
+            headers=self.headers,
+            environ=environ,
+            keep_blank_values=True,
+        )
+
+        if "file" not in form:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Missing file upload")
+            return
+        file_item = form["file"]
+        upload_file = getattr(file_item, "file", None)
+        if upload_file is None:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid file upload")
+            return
+        file_bytes = upload_file.read()
+        if not file_bytes:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Empty upload")
+            return
+
+        if Image is None:
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Pillow not available")
+            return
         try:
-            placeholders = ",".join("?" for _ in image_ids)
-            sql = f"SELECT * FROM images WHERE id IN ({placeholders})"
-            rows = conn.execute(sql, tuple(image_ids)).fetchall()
-            if include_tags:
-                tag_map = fetch_tags_for_images(conn, image_ids)
-        finally:
-            conn.close()
+            image = Image.open(io.BytesIO(file_bytes))
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.error("Failed to parse uploaded image: %s", exc)
+            self.send_error(HTTPStatus.BAD_REQUEST, "Unrecognised image data")
+            return
+        if image.mode not in ("RGB", "RGBA"):
+            image = image.convert("RGB")
+        else:
+            image = image.convert("RGB")
 
-        row_map = {row["id"]: row for row in rows}
-        payload_results = []
-        for image_id, score in window:
-            row = row_map.get(image_id)
-            if row is None:
-                continue
-            payload_results.append(
-                {
-                    "id": row["id"],
-                    "name": row["name"],
-                    "path": row["path"],
-                    "file_url": self.file_url_for(row["id"], row["path"]),
-                    "thumb_url": self.thumb_url_for(row["id"], row["path"]),
-                    "width": row["width"],
-                    "height": row["height"],
-                    "seed": row["seed"],
-                    "model": row["model"] or row["source"],
-                    "description": row["description"],
-                    "mtime": row["mtime"],
-                    "size": row["size"],
-                    "score": score,
-                    "tags": tag_map.get(row["id"], []),
-                }
-            )
+        try:
+            model = get_clip_model(config)
+        except RuntimeError as exc:  # pragma: no cover - optional dependency missing
+            LOGGER.error("Unable to load CLIP model: %s", exc)
+            self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "CLIP model unavailable")
+            return
 
-        facets_payload = summarize_facets_from_tag_map(tag_map) if include_tags else []
+        try:
+            features = model.compute_image_features([image])
+        except Exception as exc:  # pragma: no cover
+            LOGGER.error("Failed to compute CLIP vector for upload: %s", exc)
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Failed to process image")
+            return
+        if getattr(features, "size", 0) == 0:
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "CLIP feature extraction failed")
+            return
+        vector = features[0]
+        vector = vector.astype(np.float32)
+        norm = np.linalg.norm(vector)
+        if not np.isfinite(norm) or norm == 0:
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Invalid CLIP vector")
+            return
+        vector /= norm
+        vector_b64 = base64.b64encode(vector.tobytes()).decode("ascii")
 
-        self._send_json({
-            "results": payload_results,
-            "total": total,
-            "offset": offset,
-            "limit": limit,
-            "facets": facets_payload,
-        })
+        try:
+            limit = max(1, min(int(form.getfirst("limit", "20")), 200))
+        except ValueError:
+            limit = 20
+        try:
+            offset = max(0, int(form.getfirst("offset", "0")))
+        except ValueError:
+            offset = 0
+        tag_query = form.getfirst("tag_query", "") or ""
+        include_tags = _coerce_bool(form.getfirst("include_tags"), False)
+
+        restrict_ids = None
+        if isinstance(tag_query, str) and tag_query.strip():
+            conn = self.server.db.new_connection()  # type: ignore[attr-defined]
+            try:
+                tokens = tokens_from_query(tag_query)
+                restrict_ids = matched_image_ids(conn, tokens)
+            finally:
+                conn.close()
+
+        db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
+        full_results = perform_clip_search(
+            db=db,
+            config=config,
+            positive_vectors=[vector],
+            limit=0,
+            restrict_to_ids=restrict_ids,
+        )
+
+        total = len(full_results)
+        window = full_results[offset: offset + limit] if limit else full_results[offset:]
+        payload = self._build_clip_response(
+            window,
+            total,
+            offset,
+            limit,
+            include_tags=include_tags,
+        )
+        payload["vector"] = vector_b64
+        self._send_json(payload)
 
     def _handle_image_tags(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))

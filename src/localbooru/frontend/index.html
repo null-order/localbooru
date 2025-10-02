@@ -73,6 +73,11 @@ button:hover { background: rgba(255,255,255,0.16); box-shadow: 0 6px 16px rgba(0
 #detail-overlay { position: fixed; inset: 0; background: rgba(7,9,14,0.92); backdrop-filter: blur(12px); display: none; align-items: center; justify-content: center; z-index: 10; padding: 36px; }
 #detail-overlay.active { display: flex; }
 #detail-card { background: rgba(18,21,32,0.98); border-radius: 20px; border: 1px solid rgba(255,255,255,0.15); max-width: min(1700px, 96vw); max-height: 92vh; width: auto; padding: 22px 26px 26px; display: flex; flex-direction: column; gap: 18px; overflow: hidden; align-items: flex-start; }
+.drop-message { font-size: 18px; letter-spacing: 0.05em; text-transform: uppercase; padding: 24px 32px; border-radius: 16px; background: rgba(12,18,28,0.85); border: 1px solid rgba(98,214,255,0.35); box-shadow: 0 20px 40px rgba(0,0,0,0.4); text-align: center; }
+.drop-message strong { display: block; font-size: 28px; margin-bottom: 6px; }
+.drop-message span { font-size: 14px; letter-spacing: 0.12em; opacity: 0.85; }
+#drop-overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(12,16,24,0.65); backdrop-filter: blur(12px); z-index: 50; pointer-events: none; color: #e8f9ff; }
+#drop-overlay.active { display: flex; }
 .detail-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.08); }
 .detail-header h2 { margin: 0; font-size: 18px; letter-spacing: 0.03em; text-transform: uppercase; opacity: 0.85; }
 #detail-close { background: rgba(255,255,255,0.06); border-radius: 999px; padding: 6px 14px; font-size: 13px; }
@@ -236,6 +241,7 @@ button:hover { background: rgba(255,255,255,0.16); box-shadow: 0 6px 16px rgba(0
     </div>
   </div>
 </div>
+<div id="drop-overlay"><div class="drop-message"><strong>Drop image</strong><span>to find similar results</span></div></div>
 <script>
 const searchBox = document.getElementById('search');
 const gridEl = document.getElementById('grid');
@@ -247,6 +253,7 @@ const clipToggleBtn = document.getElementById('clip-toggle');
 const clipSearchInput = document.getElementById('clip-query');
 const clipSearchButton = document.getElementById('clip-search');
 const clipSearchClear = document.getElementById('clip-clear');
+const dropOverlay = document.getElementById('drop-overlay');
 const loadMoreBtn = document.getElementById('load-more');
 const suggestionsEl = document.getElementById('tag-suggestions');
 const facetListEl = document.getElementById('facet-tags');
@@ -320,6 +327,7 @@ let lastQuery = '';
 let pendingDetailId = null;
 let clipSearchTimer = null;
 const CLIP_SEARCH_DEBOUNCE = 400;
+let dragCounter = 0;
 
 function getActiveClipToken() {
     if (!clipModeActive) {
@@ -528,6 +536,127 @@ async function fetchTagBatch(batchIds) {
         }
     } catch (err) {
         console.error('Failed to load tags for images', err);
+    }
+}
+
+async function startClipUploadSearch(file) {
+    if (!file || !(file instanceof File)) {
+        return;
+    }
+    if (!file.type || !file.type.toLowerCase().startsWith('image/')) {
+        statusEl.textContent = 'Please drop an image file';
+        return;
+    }
+    if (searchState.loading) {
+        statusEl.textContent = 'Another search is in progress…';
+        return;
+    }
+
+    const tagFilter = searchBox.value.trim();
+    lastQuery = tagFilter;
+    clipModeActive = true;
+    currentClipToken = null;
+    pendingDetailId = null;
+    resetState(lastQuery, { clearClip: false });
+    clipOffset = 0;
+    clipTotal = 0;
+    scrollRestorePending = true;
+    pendingScrollIndex = 0;
+    lastAnchorIndex = 0;
+    statusEl.textContent = 'Processing image…';
+    searchState.loading = true;
+    if (clipSearchButton) clipSearchButton.disabled = true;
+    if (clipSearchClear) clipSearchClear.disabled = true;
+    if (detailSimilarBtn) detailSimilarBtn.disabled = true;
+
+    const formData = new FormData();
+    formData.append('file', file, file.name || 'upload');
+    formData.append('limit', String(PAGE_SIZE));
+    formData.append('offset', '0');
+    if (tagFilter) formData.append('tag_query', tagFilter);
+    formData.append('include_tags', '0');
+
+    try {
+        const res = await fetch('/api/search/clip/file', {
+            method: 'POST',
+            body: formData,
+        });
+        if (!res.ok) throw new Error(`clip upload failed: ${res.status}`);
+        const data = await res.json();
+        const vector = typeof data.vector === 'string' && data.vector ? data.vector : null;
+        const uploadLabel = file.name ? `image:${file.name}` : 'uploaded image';
+
+        lastClipPayload = {
+            query: '',
+            positiveImages: [],
+            negativeImages: [],
+            tagQuery: tagFilter,
+            updateInput: uploadLabel,
+            positiveVector: vector,
+        };
+
+        const results = Array.isArray(data.results) ? data.results : [];
+        const newImageIds = [];
+        results.forEach(item => {
+            const idx = searchState.images.length;
+            searchState.images.push(item);
+            searchState.index.set(item.id, idx);
+            const template = document.createElement('template');
+            template.innerHTML = renderCard(item).trim();
+            const cardEl = template.content.firstElementChild;
+            registerCardElement(cardEl, item);
+            gridEl.appendChild(cardEl);
+            if (Number.isFinite(item.id)) {
+                newImageIds.push(Number(item.id));
+            }
+        });
+
+        clipTotal = data.total ?? results.length ?? 0;
+        clipOffset = results.length;
+        searchState.total = clipTotal;
+        searchState.done = clipOffset >= clipTotal;
+        loadMoreBtn.style.display = searchState.done ? 'none' : 'block';
+
+        const backendFacets = Array.isArray(data.facets) ? data.facets : null;
+        const computedFacets = buildClipFacetSummaryFromImageTags(searchState.imageTags);
+        if (computedFacets.length) {
+            facetCache = computedFacets;
+        } else if (backendFacets && backendFacets.length) {
+            facetCache = backendFacets.map(facet => ({
+                tag: facet.tag,
+                norm: facet.norm,
+                kind: facet.kind,
+                freq: facet.freq,
+            }));
+        } else {
+            facetCache = [];
+        }
+        renderFacets(facetCache);
+
+        if (clipModeActive && newImageIds.length) {
+            loadTagsForImageIds(newImageIds);
+        }
+
+        if (clipSearchInput) {
+            clipSearchInput.value = uploadLabel;
+        }
+        updateStatus();
+        pushHistoryState({ query: lastQuery, detail: null, pos: 0, clip: null }, { replace: true });
+    } catch (err) {
+        console.error('Image similarity search failed', err);
+        statusEl.textContent = 'Image search failed';
+        resetState(lastQuery, { clearClip: false });
+        clipOffset = 0;
+        clipTotal = 0;
+        clipModeActive = false;
+        lastClipPayload = null;
+        currentClipToken = null;
+    } finally {
+        searchState.loading = false;
+        if (clipSearchButton) clipSearchButton.disabled = false;
+        if (clipSearchClear) clipSearchClear.disabled = false;
+        if (detailSimilarBtn) detailSimilarBtn.disabled = false;
+        scheduleScrollSave();
     }
 }
 
@@ -877,7 +1006,7 @@ async function fetchImages(reset=false) {
 }
 
 async function runClipSearch(
-    { query = '', positiveImages = [], negativeImages = [], tagQuery = searchBox.value.trim(), updateInput } = {},
+    { query = '', positiveImages = [], negativeImages = [], tagQuery = searchBox.value.trim(), updateInput, positiveVector = null } = {},
     { append = false, updateHistory = true } = {},
 ) {
     if (!clipEnabled) {
@@ -896,7 +1025,7 @@ async function runClipSearch(
     const trimmedQuery = originalQuery.trim();
     const posIds = Array.isArray(positiveImages) ? positiveImages.map(Number).filter(Number.isFinite) : [];
     const negIds = Array.isArray(negativeImages) ? negativeImages.map(Number).filter(Number.isFinite) : [];
-    if (!trimmedQuery && posIds.length === 0 && negIds.length === 0) {
+    if (!trimmedQuery && posIds.length === 0 && negIds.length === 0 && !positiveVector) {
         statusEl.textContent = 'Provide CLIP input';
         return;
     }
@@ -944,6 +1073,7 @@ async function runClipSearch(
     if (trimmedQuery) payload.query = trimmedQuery;
     if (posIds.length) payload.positive_images = posIds;
     if (negIds.length) payload.negative_images = negIds;
+    if (positiveVector) payload.positive_vector = positiveVector;
 
     lastClipPayload = {
         query: trimmedQuery,
@@ -953,6 +1083,7 @@ async function runClipSearch(
         updateInput: updateInput !== undefined
             ? updateInput
             : (originalQuery !== '' ? originalQuery : (posIds.length ? `image:${posIds[0]}` : '')),
+        positiveVector: positiveVector || null,
     };
     if (clipToken) {
         lastClipPayload.clipToken = clipToken;
@@ -1443,6 +1574,47 @@ copyNegativeBtn.addEventListener('click', () => {
     if (!copyNegativeBtn.disabled) {
         copyText(currentPrompts.negative);
     }
+});
+
+function isFileDrag(event) {
+    const dt = event.dataTransfer;
+    if (!dt) return false;
+    return Array.from(dt.types || []).includes('Files');
+}
+
+window.addEventListener('dragenter', (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    dragCounter += 1;
+    if (dropOverlay) dropOverlay.classList.add('active');
+});
+
+window.addEventListener('dragover', (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    if (dropOverlay && !dropOverlay.classList.contains('active')) {
+        dropOverlay.classList.add('active');
+    }
+});
+
+window.addEventListener('dragleave', (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    dragCounter = Math.max(0, dragCounter - 1);
+    if (dragCounter === 0 && dropOverlay) {
+        dropOverlay.classList.remove('active');
+    }
+});
+
+window.addEventListener('drop', (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    dragCounter = 0;
+    if (dropOverlay) dropOverlay.classList.remove('active');
+    const files = event.dataTransfer ? Array.from(event.dataTransfer.files || []) : [];
+    if (!files.length) return;
+    startClipUploadSearch(files[0]);
 });
 
 gridEl.addEventListener('click', (event) => {
