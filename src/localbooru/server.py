@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import cgi
 import hashlib
 import io
 import json
@@ -19,6 +18,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from email.utils import formatdate
+from email.parser import BytesParser
+from email.policy import default as default_email_policy
 
 import numpy as np
 
@@ -109,6 +110,47 @@ def summarize_facets_from_tag_map(
 
 class LocalBooruRequestHandler(BaseHTTPRequestHandler):
     server_version = "LocalBooru/0.1"
+
+    def _parse_multipart_form(self, body: bytes, content_type: str) -> Tuple[Dict[str, List[str]], List[Dict[str, object]]]:
+        headers = f"Content-Type: {content_type}\r\n\r\n".encode("utf-8")
+        try:
+            message = BytesParser(policy=default_email_policy).parsebytes(headers + body)
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.error("Failed to parse multipart form: %s", exc)
+            return {}, []
+
+        fields: Dict[str, List[str]] = {}
+        files: List[Dict[str, object]] = []
+
+        if message.get_content_maintype() != "multipart":
+            return fields, files
+
+        for part in message.iter_parts():
+            if part.get_content_disposition() != "form-data":
+                continue
+            name = part.get_param("name", header="content-disposition")
+            if not name:
+                continue
+            filename = part.get_filename()
+            payload = part.get_payload(decode=True) or b""
+            if filename:
+                files.append(
+                    {
+                        "name": name,
+                        "filename": filename,
+                        "data": payload,
+                        "content_type": part.get_content_type(),
+                    }
+                )
+            else:
+                charset = part.get_content_charset() or "utf-8"
+                try:
+                    text = payload.decode(charset, errors="replace")
+                except LookupError:
+                    text = payload.decode("utf-8", errors="replace")
+                fields.setdefault(name, []).append(text)
+
+        return fields, files
 
     def _build_clip_response(
         self,
@@ -217,6 +259,9 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/search/clip":
             self._handle_clip_search()
+            return
+        if parsed.path == "/api/search/clip/file":
+            self._handle_clip_search_file()
             return
         if parsed.path == "/api/image-tags":
             self._handle_image_tags()
@@ -525,34 +570,39 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             return
 
         content_type = self.headers.get("Content-Type", "")
-        ctype, pdict = cgi.parse_header(content_type)
-        if ctype != "multipart/form-data" or "boundary" not in pdict:
+        if not content_type.startswith("multipart/form-data"):
             self.send_error(HTTPStatus.BAD_REQUEST, "Expected multipart form data")
             return
 
-        environ = {
-            "REQUEST_METHOD": "POST",
-            "CONTENT_TYPE": content_type,
-        }
-        form = cgi.FieldStorage(  # type: ignore[arg-type]
-            fp=self.rfile,
-            headers=self.headers,
-            environ=environ,
-            keep_blank_values=True,
-        )
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Missing request body")
+            return
+        try:
+            body = self.rfile.read(length)
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.error("Failed to read upload body: %s", exc)
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid body")
+            return
 
-        if "file" not in form:
+        fields, files = self._parse_multipart_form(body, content_type)
+        upload_info = None
+        for file_entry in files:
+            if file_entry.get("name") == "file":
+                upload_info = file_entry
+                break
+        if upload_info is None and files:
+            upload_info = files[0]
+        if upload_info is None:
             self.send_error(HTTPStatus.BAD_REQUEST, "Missing file upload")
             return
-        file_item = form["file"]
-        upload_file = getattr(file_item, "file", None)
-        if upload_file is None:
-            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid file upload")
-            return
-        file_bytes = upload_file.read()
+
+        file_bytes = upload_info.get("data") or b""
         if not file_bytes:
             self.send_error(HTTPStatus.BAD_REQUEST, "Empty upload")
             return
+
+        filename = upload_info.get("filename") or "upload"
 
         if Image is None:
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Pillow not available")
@@ -593,16 +643,22 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         vector /= norm
         vector_b64 = base64.b64encode(vector.tobytes()).decode("ascii")
 
+        def _field(name: str, default: str = "") -> str:
+            values = fields.get(name)
+            if not values:
+                return default
+            return values[0]
+
         try:
-            limit = max(1, min(int(form.getfirst("limit", "20")), 200))
+            limit = max(1, min(int(_field("limit", "20")), 200))
         except ValueError:
             limit = 20
         try:
-            offset = max(0, int(form.getfirst("offset", "0")))
+            offset = max(0, int(_field("offset", "0")))
         except ValueError:
             offset = 0
-        tag_query = form.getfirst("tag_query", "") or ""
-        include_tags = _coerce_bool(form.getfirst("include_tags"), False)
+        tag_query = _field("tag_query", "") or ""
+        include_tags = _coerce_bool(_field("include_tags", "0"), False)
 
         restrict_ids = None
         if isinstance(tag_query, str) and tag_query.strip():
@@ -632,6 +688,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             include_tags=include_tags,
         )
         payload["vector"] = vector_b64
+        payload["filename"] = filename
         self._send_json(payload)
 
     def _handle_image_tags(self) -> None:
