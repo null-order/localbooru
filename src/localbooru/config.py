@@ -1,6 +1,7 @@
 """Configuration helpers for localbooru."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -31,7 +32,12 @@ class LocalBooruConfig:
     def from_args(cls, args: "argparse.Namespace") -> "LocalBooruConfig":
         root = Path(args.root).resolve()
         db_path = Path(args.db).resolve()
-        thumb_cache = Path(args.thumb_cache or root / ".cache" / "thumbs").resolve()
+
+        if args.thumb_cache:
+            thumb_cache = Path(args.thumb_cache).expanduser().resolve()
+        else:
+            cache_root = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser()
+            thumb_cache = (cache_root / "localbooru" / "thumbs").resolve()
         return cls(
             root=root,
             db_path=db_path,

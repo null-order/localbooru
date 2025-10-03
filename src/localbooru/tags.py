@@ -62,7 +62,150 @@ def split_prompt(text: str) -> List[str]:
     return tokens
 
 
-_weighted_prompt_re = re.compile(r"^([+-]?(?:\d*\.\d+|\d+))::(.*)::\s*$")
+def _strip_balanced_wrappers(token: str) -> Tuple[str, int, int]:
+    strong = 0
+    weak = 0
+    current = token
+    while True:
+        stripped = current.strip()
+        if len(stripped) >= 2 and stripped.startswith("{") and stripped.endswith("}"):
+            strong += 1
+            current = stripped[1:-1]
+            continue
+        if len(stripped) >= 2 and stripped.startswith("[") and stripped.endswith("]"):
+            weak += 1
+            current = stripped[1:-1]
+            continue
+        break
+    return current.strip(), strong, weak
+
+
+def _consume_leading_wrappers(token: str) -> Tuple[str, int, int]:
+    strong = 0
+    weak = 0
+    i = 0
+    length = len(token)
+    while i < length:
+        ch = token[i]
+        if ch == "{":
+            strong += 1
+            i += 1
+            continue
+        if ch == "[":
+            weak += 1
+            i += 1
+            continue
+        if ch.isspace():
+            i += 1
+            continue
+        break
+    return token[i:].lstrip(), strong, weak
+
+
+def _consume_trailing_wrappers(token: str) -> str:
+    end = len(token)
+    while end > 0:
+        ch = token[end - 1]
+        if ch in "}]":
+            end -= 1
+            continue
+        if ch.isspace():
+            end -= 1
+            continue
+        break
+    return token[:end].rstrip()
+
+
+_weighted_prompt_re = re.compile(
+    r"^([+-]?(?:\d*\.\d+|\d+)?)\s*::\s*(.*?)(?:\s*::\s*)?$"
+)
+
+
+def _parse_prompt_token(
+    raw_token: str,
+    kind: str,
+    *,
+    weight_factor: float = 1.0,
+    inherited_emphasis: Optional[str] = None,
+) -> List[TagRecord]:
+    token = raw_token.strip()
+    if not token:
+        return []
+
+    strong = 0
+    weak = 0
+
+    token, balanced_strong, balanced_weak = _strip_balanced_wrappers(token)
+    strong += balanced_strong
+    weak += balanced_weak
+
+    token, prefix_strong, prefix_weak = _consume_leading_wrappers(token)
+    strong += prefix_strong
+    weak += prefix_weak
+
+    token = _consume_trailing_wrappers(token)
+
+    local_weight = weight_factor
+    if strong:
+        local_weight *= 1.1 ** strong
+    if weak:
+        local_weight *= 0.9 ** weak
+
+    emphasis: Optional[str] = inherited_emphasis
+    if strong and not weak:
+        emphasis = "strong"
+    elif weak and not strong:
+        emphasis = "weak"
+    elif strong and weak:
+        emphasis = "strong"
+
+    if not token:
+        return []
+
+    subtokens = split_prompt(token)
+    if len(subtokens) > 1:
+        records: List[TagRecord] = []
+        for sub in subtokens:
+            records.extend(
+                _parse_prompt_token(
+                    sub,
+                    kind,
+                    weight_factor=local_weight,
+                    inherited_emphasis=emphasis,
+                )
+            )
+        return records
+
+    weighted_match = _weighted_prompt_re.match(token)
+    if weighted_match:
+        numeric_str = weighted_match.group(1) or ""
+        token = weighted_match.group(2).strip()
+        emphasis = "weighted"
+        try:
+            numeric_value = float(numeric_str) if numeric_str not in {"", "+", "-"} else 1.0
+        except ValueError:
+            numeric_value = 1.0
+        local_weight *= numeric_value
+
+    if not token:
+        return []
+
+    norm = normalize_tag(token)
+    if not norm:
+        return []
+
+    final_emphasis = emphasis or "normal"
+    clean = token.strip()
+    return [
+        TagRecord(
+            tag=clean,
+            norm=norm,
+            kind=kind,
+            emphasis=final_emphasis,
+            weight=local_weight,
+            raw=raw_token.strip(),
+        )
+    ]
 
 
 def parse_prompt(text: str, kind: str) -> List[TagRecord]:
@@ -70,40 +213,10 @@ def parse_prompt(text: str, kind: str) -> List[TagRecord]:
         return []
     results: Dict[str, TagRecord] = {}
     for raw_token in split_prompt(text):
-        token = raw_token.strip()
-        if not token:
-            continue
-        strong = 0
-        weak = 0
-        while token.startswith("{") and token.endswith("}") and len(token) >= 2:
-            token = token[1:-1].strip()
-            strong += 1
-        while token.startswith("[") and token.endswith("]") and len(token) >= 2:
-            token = token[1:-1].strip()
-            weak += 1
-        weight = 1.0
-        emphasis = "normal"
-        if strong > 0 and weak == 0:
-            emphasis = "strong"
-            weight *= 1.1 ** strong
-        elif weak > 0 and strong == 0:
-            emphasis = "weak"
-            weight *= 0.9 ** weak
-        weighted_match = _weighted_prompt_re.match(token)
-        if weighted_match:
-            numeric = float(weighted_match.group(1))
-            token = weighted_match.group(2).strip()
-            if token:
-                emphasis = "weighted"
-                weight = numeric
-        norm = normalize_tag(token)
-        if not norm:
-            continue
-        clean = token.strip()
-        existing = results.get(norm)
-        record = TagRecord(tag=clean, norm=norm, kind=kind, emphasis=emphasis, weight=weight, raw=raw_token)
-        if existing is None or abs(weight) > abs(existing.weight):
-            results[norm] = record
+        for record in _parse_prompt_token(raw_token, kind):
+            existing = results.get(record.norm)
+            if existing is None or abs(record.weight) > abs(existing.weight):
+                results[record.norm] = record
     return list(results.values())
 
 
