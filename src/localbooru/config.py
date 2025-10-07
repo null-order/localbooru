@@ -23,7 +23,14 @@ class LocalBooruConfig:
     clip_enabled: bool = True
     clip_model_name: str = "ViT-B-32-quickgelu"
     clip_checkpoint: str = "openai"
-    webview: bool = True
+    auto_tag_missing: bool = True
+    auto_tag_model: str = "ConvNextV2"
+    auto_tag_general_threshold: float = 0.35
+    auto_tag_character_threshold: float = 0.85
+    auto_tag_mode: str = "augment"
+    auto_tag_background: bool = True
+    auto_tag_batch_size: int = 4
+    webview: bool = False
     no_ui: bool = False
     log_level: str = "INFO"
     extra_roots: list[Path] = field(default_factory=list)
@@ -38,6 +45,15 @@ class LocalBooruConfig:
         else:
             cache_root = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser()
             thumb_cache = (cache_root / "localbooru" / "thumbs").resolve()
+
+        auto_tag_missing = args.auto_tag_missing
+        if auto_tag_missing is None:
+            auto_tag_missing = True
+
+        auto_tag_background = args.auto_tag_background
+        if auto_tag_background is None:
+            auto_tag_background = True
+
         return cls(
             root=root,
             db_path=db_path,
@@ -53,7 +69,14 @@ class LocalBooruConfig:
             clip_enabled=not args.no_clip,
             clip_model_name=args.clip_model_name,
             clip_checkpoint=args.clip_checkpoint,
-            webview=not args.no_webview,
+            auto_tag_missing=auto_tag_missing,
+            auto_tag_model=args.auto_tag_model,
+            auto_tag_general_threshold=args.auto_tag_general_threshold,
+            auto_tag_character_threshold=args.auto_tag_character_threshold,
+            auto_tag_mode=str(args.auto_tag_mode).lower(),
+            auto_tag_background=auto_tag_background,
+            auto_tag_batch_size=max(1, int(args.auto_tag_batch_size)),
+            webview=bool(args.webview),
             no_ui=args.no_ui,
             log_level=args.log_level,
             extra_roots=[Path(p).resolve() for p in args.extra_root or []],

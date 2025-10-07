@@ -23,6 +23,7 @@ from email.policy import default as default_email_policy
 
 import numpy as np
 
+from .auto_tagging import AutoTagIndexer, AutoTagProgress
 from .clip import ClipIndexer, ClipProgress, get_clip_model
 from .clip_search import perform_clip_search
 from .config import LocalBooruConfig
@@ -839,6 +840,8 @@ class LocalBooruHTTPServer(ThreadingHTTPServer):
         scanner: Optional[Scanner] = None,
         progress: Optional[ClipProgress] = None,
         clip_indexer: Optional[ClipIndexer] = None,
+        auto_progress: Optional[AutoTagProgress] = None,
+        auto_indexer: Optional[AutoTagIndexer] = None,
     ) -> None:
         super().__init__(server_address, RequestHandlerClass)
         self.config = config
@@ -846,6 +849,8 @@ class LocalBooruHTTPServer(ThreadingHTTPServer):
         self.scanner = scanner
         self.progress = progress
         self.clip_indexer = clip_indexer
+        self.auto_progress = auto_progress
+        self.auto_indexer = auto_indexer
         self._thumb_lock = threading.Lock()
 
         def _resolve_base(path: Path) -> Path:
@@ -941,16 +946,38 @@ def run_server(
     progress: ClipProgress,
     clip_indexer: Optional[ClipIndexer],
 ) -> None:  # pragma: no cover - networking
+    httpd = create_http_server(
+        config=config,
+        db=db,
+        scanner=scanner,
+        progress=progress,
+        clip_indexer=clip_indexer,
+        auto_progress=None,
+        auto_indexer=None,
+    )
     LOGGER.info("HTTP server listening on http://%s:%d", config.host, config.port)
-    httpd = LocalBooruHTTPServer(
+    try:
+        httpd.serve_forever()
+    finally:
+        httpd.server_close()
+
+
+def create_http_server(
+    config: LocalBooruConfig,
+    db: LocalBooruDatabase,
+    scanner: Scanner,
+    progress: ClipProgress,
+    clip_indexer: Optional[ClipIndexer],
+    auto_progress: Optional[AutoTagProgress],
+    auto_indexer: Optional[AutoTagIndexer],
+) -> "LocalBooruHTTPServer":
+    return LocalBooruHTTPServer(
         (config.host, config.port),
         config=config,
         db=db,
         scanner=scanner,
         progress=progress,
         clip_indexer=clip_indexer,
+        auto_progress=auto_progress,
+        auto_indexer=auto_indexer,
     )
-    try:
-        httpd.serve_forever()
-    finally:
-        httpd.server_close()

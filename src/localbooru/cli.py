@@ -5,13 +5,101 @@ import argparse
 import logging
 import socket
 import threading
+import webbrowser
 from contextlib import closing
 from pathlib import Path
+import sys
 from typing import Optional
 
 from .config import LocalBooruConfig
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _ScanProgressPrinter(threading.Thread):
+    def __init__(self, progress: "ScanProgress", stream) -> None:
+        super().__init__(daemon=True)
+        self.progress = progress
+        self.stream = stream
+        self._stop_event = threading.Event()
+        self._last_line_length = 0
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:  # pragma: no cover - terminal UX
+        while not self._stop_event.is_set():
+            self._render()
+            if self._stop_event.wait(0.5):
+                break
+        self._render(final=True)
+
+    def _render(self, final: bool = False) -> None:
+        snapshot = self.progress.snapshot()
+        total = snapshot.get("total") or 0
+        processed = snapshot.get("processed") or 0
+        errors = snapshot.get("errors") or 0
+        state = snapshot.get("state") or "idle"
+        rate = snapshot.get("rate_per_min") or 0.0
+        eta = snapshot.get("eta_seconds")
+        percent = (processed / total * 100.0) if total else 0.0
+        if rate > 0.1:
+            rate_display = f"{rate:.1f}/min"
+        elif rate > 0:
+            rate_display = f"{rate:.2f}/min"
+        else:
+            rate_display = ""
+        eta_display = ""
+        if isinstance(eta, (float, int)) and eta and eta > 0:
+            eta_display = _format_eta(float(eta))
+        parts = [
+            "Scanning",
+            f"{processed}/{total}" if total else str(processed),
+            f"{percent:5.1f}%",
+        ]
+        if rate_display:
+            parts.append(rate_display)
+        if eta_display:
+            parts.append(f"ETA {eta_display}")
+        if errors:
+            parts.append(f"errors:{errors}")
+        if state == "complete" and not final:
+            parts.append("[finalizing]")
+        else:
+            parts.append(f"[{state}]")
+        line = " | ".join(parts)
+        padded = line.ljust(self._last_line_length)
+        self.stream.write(f"\r{padded}")
+        self.stream.flush()
+        self._last_line_length = len(line)
+        if final:
+            self.stream.write("\n")
+            self.stream.flush()
+            self._last_line_length = 0
+
+
+def _format_eta(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    minutes, sec = divmod(int(seconds + 0.5), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{sec:02d}s"
+    return f"{sec}s"
+
+
+def _run_scan(scanner: "Scanner", scan_progress: "ScanProgress", *, show_progress: bool, stream=None) -> None:
+    printer: Optional[_ScanProgressPrinter] = None
+    if show_progress:
+        printer = _ScanProgressPrinter(scan_progress, stream or sys.stderr)
+        printer.start()
+    try:
+        scanner.run_once()
+    finally:
+        if printer is not None:
+            printer.stop()
+            printer.join()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,7 +118,66 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-clip", action="store_true", help="Disable CLIP indexing and search features")
     parser.add_argument("--clip-model-name", default="ViT-B-32-quickgelu", help="OpenCLIP model name")
     parser.add_argument("--clip-checkpoint", default="openai", help="OpenCLIP checkpoint name")
-    parser.add_argument("--no-webview", action="store_true", help="Do not launch embedded webview window")
+    parser.add_argument(
+        "--auto-tag-missing",
+        dest="auto_tag_missing",
+        action="store_true",
+        default=None,
+        help="Enable WD14 auto-tagging integration (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-auto-tag",
+        dest="auto_tag_missing",
+        action="store_false",
+        help="Disable WD14 auto-tagging integration",
+    )
+    parser.add_argument(
+        "--auto-tag-model",
+        default="ConvNextV2",
+        help="WD14 model to load when auto-tagging is enabled",
+    )
+    parser.add_argument(
+        "--auto-tag-general-threshold",
+        type=float,
+        default=0.35,
+        help="Confidence threshold for WD14 general tags",
+    )
+    parser.add_argument(
+        "--auto-tag-character-threshold",
+        type=float,
+        default=0.85,
+        help="Confidence threshold for WD14 character tags",
+    )
+    parser.add_argument(
+        "--auto-tag-mode",
+        choices=["missing", "augment"],
+        default="augment",
+        help="Control whether WD14 tags only fill gaps or also augment embedded metadata",
+    )
+    parser.add_argument(
+        "--auto-tag-background",
+        dest="auto_tag_background",
+        action="store_true",
+        default=None,
+        help="Queue auto-tagging jobs for background processing (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-auto-tag-background",
+        dest="auto_tag_background",
+        action="store_false",
+        help="Run auto-tagging inline during ingestion",
+    )
+    parser.add_argument(
+        "--auto-tag-batch-size",
+        type=int,
+        default=4,
+        help="Number of auto-tagging jobs to process per batch when background mode is enabled",
+    )
+    parser.add_argument(
+        "--webview",
+        action="store_true",
+        help="Launch the embedded pywebview window instead of opening the default browser",
+    )
     parser.add_argument("--no-ui", action="store_true", help="Run without opening a browser window")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument("--extra-root", action="append", help="Additional directories to include in scans")
@@ -68,8 +215,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Deferred imports to avoid pulling heavy dependencies for simple status calls later.
     from . import database
-    from .scanner import Scanner
-    from .server import run_server
+    from .auto_tagging import AutoTagIndexer, AutoTagProgress
+    from .scanner import ScanProgress, Scanner
+    from .server import create_http_server
     from .clip import ClipIndexer, ClipProgress
 
     Path(config.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -78,7 +226,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     db = database.LocalBooruDatabase(config.db_path)
 
     progress = ClipProgress(model_key=config.clip_model_key)
+    auto_progress = AutoTagProgress()
     clip_indexer: Optional[ClipIndexer] = None
+    auto_indexer: Optional[AutoTagIndexer] = None
 
     if config.clip_enabled:
         clip_indexer = ClipIndexer(
@@ -87,17 +237,29 @@ def main(argv: Optional[list[str]] = None) -> int:
             progress=progress,
         )
 
-    scanner = Scanner(config=config, db=db, clip_progress=progress)
+    if config.auto_tag_missing and config.auto_tag_background:
+        auto_indexer = AutoTagIndexer(
+            db=db,
+            config=config,
+            progress=auto_progress,
+        )
+
+    scan_progress = ScanProgress()
+    scanner = Scanner(config=config, db=db, clip_progress=progress, scan_progress=scan_progress)
 
     if args.status:
         status = progress.snapshot(db)
+        if config.auto_tag_missing:
+            status["auto_tag"] = auto_progress.snapshot(db)
         print(status)
         return 0
 
     if args.scan_only:
-        scanner.run_once()
+        _run_scan(scanner, scan_progress, show_progress=sys.stderr.isatty(), stream=sys.stderr)
         if clip_indexer:
             clip_indexer.process_until_empty()
+        if auto_indexer:
+            auto_indexer.process_until_empty()
         return 0
 
     if args.clip_only:
@@ -107,49 +269,86 @@ def main(argv: Optional[list[str]] = None) -> int:
             LOGGER.warning("CLIP indexing disabled; nothing to do")
         return 0
 
-    scanner.run_once()
+    _run_scan(
+        scanner,
+        scan_progress,
+        show_progress=(sys.stderr.isatty() and not args.status),
+        stream=sys.stderr,
+    )
 
     if config.clip_enabled:
-        total, completed, processing = db.clip_progress_counts(config.clip_model_key)
+        total, completed, processing, errors = db.clip_progress_counts(config.clip_model_key)
+        effective_total = max(total - errors, 0)
         progress.total = total
         progress.completed = completed
         progress.processing = processing
-        progress.queued = max(total - completed - processing, 0)
+        progress.error_count = errors
+        progress.queued = max(effective_total - completed - processing, 0)
 
-    server_thread = threading.Thread(
-        target=run_server,
-        kwargs={"config": config, "db": db, "scanner": scanner, "progress": progress, "clip_indexer": clip_indexer},
-        daemon=True,
+    if config.auto_tag_missing:
+        auto_progress.refresh_from_db(db)
+
+    httpd = create_http_server(
+        config=config,
+        db=db,
+        scanner=scanner,
+        progress=progress,
+        clip_indexer=clip_indexer,
+        auto_progress=auto_progress,
+        auto_indexer=auto_indexer,
     )
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     server_thread.start()
+    LOGGER.info("HTTP server listening on http://%s:%d", config.host, config.port)
 
     if clip_indexer:
         clip_indexer.start()
 
+    if auto_indexer:
+        auto_indexer.start()
+
     if config.watch:
         scanner.start()
 
+    app_url = f"http://{config.host}:{config.port}/"
     if not config.no_ui:
-        try:
-            from .webview_app import launch_webview
+        if config.webview:
+            try:
+                from .webview_app import launch_webview
 
-            launch_webview(config)
-        except Exception as exc:  # pragma: no cover - webview optional path
-            LOGGER.warning("unable to launch webview: %s", exc)
+                launch_webview(config)
+            except Exception as exc:  # pragma: no cover - webview optional path
+                LOGGER.warning("unable to launch webview: %s", exc)
+        else:
+            try:
+                webbrowser.open(app_url)
+            except Exception as exc:  # pragma: no cover - optional
+                LOGGER.warning("unable to open browser: %s", exc)
 
     try:
-        server_thread.join()
+        while server_thread.is_alive():
+            server_thread.join(timeout=0.5)
     except KeyboardInterrupt:
         LOGGER.info("Shutting down...")
+    finally:
+        try:
+            httpd.shutdown()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        httpd.server_close()
+        server_thread.join(timeout=2)
 
-    if clip_indexer:
-        clip_indexer.stop()
-        clip_indexer.join()
-    if config.watch:
-        scanner.stop()
-        scanner.join()
+        if clip_indexer:
+            clip_indexer.stop()
+            clip_indexer.join()
+        if auto_indexer:
+            auto_indexer.stop()
+            auto_indexer.join()
+        if config.watch:
+            scanner.stop()
+            scanner.join()
 
-    db.close()
+        db.close()
     return 0
 
 

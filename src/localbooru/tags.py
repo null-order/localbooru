@@ -18,6 +18,7 @@ class TagRecord:
     emphasis: str
     weight: float
     raw: str
+    source: str = "embedded"
 
 
 _tag_normalize_regexes = [
@@ -358,6 +359,23 @@ def collect_tags(chunks: Dict[str, str]) -> Tuple[List[TagRecord], Optional[str]
                 order.append(key)
     combined = [dedup[key] for key in order]
     return combined, description_text, comment_meta
+
+
+def merge_tag_records(
+    primary: Sequence[TagRecord],
+    secondary: Sequence[TagRecord],
+) -> List[TagRecord]:
+    """Return a combined list preserving `primary` order while appending unique items from `secondary`."""
+
+    combined: List[TagRecord] = list(primary)
+    seen = {(tag.kind, tag.norm) for tag in primary}
+    for tag in secondary:
+        key = (tag.kind, tag.norm)
+        if key in seen:
+            continue
+        combined.append(tag)
+        seen.add(key)
+    return combined
 
 
 def parse_query_tokens(query: str) -> List[Tuple[str, str, bool]]:

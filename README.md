@@ -23,7 +23,20 @@ python -m localbooru.cli --status --db /tmp/localbooru.db
 python -m localbooru.cli --clip-only --db /tmp/localbooru.db
 ```
 
-Launching without `--no-ui` will attempt to open a frameless `pywebview` window (install via `pip install localbooru[ui]`). CLIP indexing requires the optional extras (`pip install localbooru[clip]`).
+Launching without `--no-ui` now opens the gallery in your default browser. Opt back into the embedded shell with `--webview` (install via `pip install localbooru[ui]` if you want that route). CLIP indexing requires the optional extras (`pip install localbooru[clip]`).
+
+### Automatic tagging for unlabeled images
+
+Install the WD14 helpers (`pip install localbooru[tagging]`) to let the bundled WD14 queue run by default. Auto-tagging now starts in augment + background mode out of the box; tweak it via:
+
+- `--no-auto-tag` to opt out entirely, or `--auto-tag-mode missing` to only fill empty metadata slots.
+- `--no-auto-tag-background` to run synchronously during ingestion (`--auto-tag-batch-size` still applies when backgrounded).
+- `--auto-tag-model`, `--auto-tag-general-threshold`, and `--auto-tag-character-threshold` to tweak model selection and confidence cutoffs.
+- The default model is SmilingWolf’s `ConvNextV2`; other installed variants (e.g. `ViT`, `MOAT`, `EVA02_Large`) can be selected with `--auto-tag-model`.
+
+Use `localbooru --status` (or the new spinning gear menu in the UI) to inspect both CLIP and auto-tag queue progress.
+
+On the detail view you'll now see status chips for CLIP/Tag state, plus auto-generated prompts (with NovelAI and Danbooru copy buttons) whenever an image only has WD14-sourced tags.
 
 ## CLIP search & similarity
 

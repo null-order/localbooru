@@ -6,7 +6,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PIL import Image, UnidentifiedImageError
 
@@ -38,18 +38,29 @@ class ClipProgress:
     completed: int = 0
     processing: int = 0
     queued: int = 0
+    error_count: int = 0
     current_path: Optional[str] = None
     started_at: Optional[float] = None
     last_update: Optional[float] = None
     paused: bool = False
     errors: list[str] = field(default_factory=list)
+    history: List[Tuple[float, int]] = field(default_factory=list)
 
     def snapshot(self, db: Optional[LocalBooruDatabase] = None) -> Dict[str, object]:
         data = asdict(self)
         if db is not None:
-            total, completed, processing = db.clip_progress_counts(self.model_key)
-            data.update({"total": total, "completed": completed, "processing": processing})
-            data["queued"] = max(total - completed - processing, 0)
+            total, completed, processing, errors = db.clip_progress_counts(self.model_key)
+            effective_total = max(total - errors, 0)
+            data.update(
+                {
+                    "total": total,
+                    "completed": completed,
+                    "processing": processing,
+                    "error_count": errors,
+                    "effective_total": effective_total,
+                }
+            )
+            data["queued"] = max(effective_total - completed - processing, 0)
         data["timestamp"] = time.time()
         if self.paused:
             state = "paused"
@@ -59,7 +70,36 @@ class ClipProgress:
             state = "idle"
         data["state"] = state
         data["error_sample"] = self.errors[-5:]
+        rate_per_min, eta_seconds = self._compute_rate_eta()
+        data["rate_per_min"] = rate_per_min
+        data["eta_seconds"] = eta_seconds
         return data
+
+    def _record_history(self, completed: int) -> None:
+        now = time.time()
+        if self.history and self.history[-1][1] == completed:
+            self.history[-1] = (now, completed)
+        else:
+            self.history.append((now, completed))
+        if len(self.history) > 60:
+            self.history = self.history[-60:]
+
+    def _compute_rate_eta(self) -> Tuple[float, Optional[float]]:
+        if not self.history:
+            return 0.0, None
+        latest_time, latest_completed = self.history[-1]
+        rate_per_min = 0.0
+        eta_seconds = None
+        for past_time, past_completed in reversed(self.history[:-1]):
+            delta_count = latest_completed - past_completed
+            delta_time = latest_time - past_time
+            if delta_count > 0 and delta_time >= 1.0:
+                rate_per_min = (delta_count / delta_time) * 60.0
+                break
+        remaining = max(self.queued, 0)
+        if rate_per_min > 0 and remaining > 0:
+            eta_seconds = (remaining / rate_per_min) * 60.0
+        return rate_per_min, eta_seconds
 
 
 class ClipIndexer(threading.Thread):
@@ -180,11 +220,14 @@ class ClipIndexer(threading.Thread):
         return self._model
 
     def _refresh_progress(self) -> None:
-        total, completed, processing = self.db.clip_progress_counts(self.progress.model_key)
+        total, completed, processing, errors = self.db.clip_progress_counts(self.progress.model_key)
+        effective_total = max(total - errors, 0)
         self.progress.total = total
         self.progress.completed = completed
         self.progress.processing = processing
-        self.progress.queued = max(total - completed - processing, 0)
+        self.progress.error_count = errors
+        self.progress.queued = max(effective_total - completed - processing, 0)
+        self.progress._record_history(completed)
         self.progress.last_update = time.time()
 
     def pause(self) -> None:

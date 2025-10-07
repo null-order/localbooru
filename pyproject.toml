@@ -13,6 +13,7 @@ dependencies = [
   "pillow",
   "open_clip_torch",
   "torch",
+  "torchvision",
   "pywebview",
 ]
 
@@ -20,9 +21,13 @@ dependencies = [
 clip = [
   "open_clip_torch",
   "torch",
+  "torchvision",
 ]
 ui = [
   "pywebview",
+]
+tagging = [
+  "imgutils[tagging]",
 ]
 
 [project.scripts]

@@ -174,12 +174,19 @@ def fetch_tags_for_images(
         return {}
     placeholders = ",".join("?" for _ in image_ids)
     rows = conn.execute(
-        f"SELECT image_id, tag, norm, kind FROM tags WHERE image_id IN ({placeholders})",
+        f"SELECT image_id, tag, norm, kind, source FROM tags WHERE image_id IN ({placeholders})",
         tuple(image_ids),
     ).fetchall()
     grouped: Dict[int, List[Dict[str, object]]] = defaultdict(list)
-    for image_id, tag, norm, kind in rows:
+    for image_id, tag, norm, kind, source in rows:
         if kind not in ("prompt", "character", "negative"):
             continue
-        grouped[image_id].append({"tag": tag, "norm": norm, "kind": kind})
+        grouped[image_id].append(
+            {
+                "tag": tag,
+                "norm": norm,
+                "kind": kind,
+                "source": source or "embedded",
+            }
+        )
     return {image_id: tags for image_id, tags in grouped.items()}
