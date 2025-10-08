@@ -37,4 +37,4 @@ localbooru = "localbooru.cli:main"
 package-dir = {"" = "src"}
 packages = ["localbooru"]
 include-package-data = true
-package-data = {"localbooru" = ["frontend/index.html", "static/**", "templates/**"]}
+package-data = {"localbooru" = ["frontend/index.html", "frontend/app.css", "frontend/app.js", "static/**", "templates/**"]}

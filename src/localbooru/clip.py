@@ -159,6 +159,11 @@ class ClipIndexer(threading.Thread):
                 self.db.mark_clip_error(row["image_id"], "cannot identify image")
                 self._record_error(f"Unidentified image: {abs_path}")
                 continue
+            except OSError as exc:
+                LOGGER.warning("Truncated image for CLIP embedding: %s (%s)", abs_path, exc)
+                self.db.mark_clip_error(row["image_id"], "file truncated")
+                self._record_error(f"Truncated image: {abs_path}")
+                continue
             except Exception as exc:
                 LOGGER.exception("Error opening %s: %s", abs_path, exc)
                 self.db.mark_clip_error(row["image_id"], str(exc))

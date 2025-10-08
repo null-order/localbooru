@@ -227,6 +227,9 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         if path == "/":
             self._serve_index()
             return
+        if path in {"/app.css", "/app.js"}:
+            self._serve_frontend_asset(path.lstrip("/"))
+            return
         if path == "/api/status/clip":
             self._handle_clip_status()
             return
@@ -289,6 +292,32 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         data = index_file.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_frontend_asset(self, filename: str) -> None:
+        base_dir = Path(__file__).resolve().parent / "frontend"
+        try:
+            asset_path = (base_dir / filename).resolve(strict=True)
+        except FileNotFoundError:
+            self.send_error(HTTPStatus.NOT_FOUND, f"{filename} missing")
+            return
+        base_resolved = base_dir.resolve()
+        if asset_path.parent != base_resolved:
+            self.send_error(HTTPStatus.NOT_FOUND, "invalid asset path")
+            return
+        if not asset_path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, "asset not found")
+            return
+        data = asset_path.read_bytes()
+        content_type, _encoding = mimetypes.guess_type(asset_path.name)
+        if not content_type:
+            content_type = "application/octet-stream"
+        if content_type.startswith("text/"):
+            content_type = f"{content_type}; charset=utf-8"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

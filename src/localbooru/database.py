@@ -177,20 +177,24 @@ class LocalBooruDatabase:
                     )
 
     def reserve_clip_batch(self, model: str, limit: int) -> List[sqlite3.Row]:
-        with self._connection:
-            rows = self._connection.execute(
-                "SELECT ce.image_id, i.path, i.mtime FROM clip_embeddings ce JOIN images i ON i.id = ce.image_id "
-                "WHERE ce.status = 'pending' AND ce.model = ? ORDER BY ce.queued_at ASC LIMIT ?",
-                (model, limit),
-            ).fetchall()
-            if not rows:
-                return []
-            now = time.time()
-            self._connection.executemany(
-                "UPDATE clip_embeddings SET status='processing', updated_at=? WHERE image_id=?",
-                ((now, row["image_id"]) for row in rows),
-            )
-            return rows
+        conn = self.new_connection()
+        try:
+            with conn:
+                rows = conn.execute(
+                    "SELECT ce.image_id, i.path, i.mtime FROM clip_embeddings ce JOIN images i ON i.id = ce.image_id "
+                    "WHERE ce.status = 'pending' AND ce.model = ? ORDER BY ce.queued_at ASC LIMIT ?",
+                    (model, limit),
+                ).fetchall()
+                if not rows:
+                    return []
+                now = time.time()
+                conn.executemany(
+                    "UPDATE clip_embeddings SET status='processing', updated_at=? WHERE image_id=?",
+                    ((now, row["image_id"]) for row in rows),
+                )
+                return rows
+        finally:
+            conn.close()
 
     def mark_clip_error(self, image_id: int, message: str) -> None:
         with self._connection:
@@ -287,22 +291,25 @@ class LocalBooruDatabase:
                     )
 
     def reserve_auto_tag_batch(self, limit: int) -> List[sqlite3.Row]:
-        with self._connection:
-            rows = self._connection.execute(
-                "SELECT j.image_id, i.path FROM auto_tag_jobs j "
-                "JOIN images i ON i.id = j.image_id "
-                "WHERE j.status = 'pending' ORDER BY j.queued_at ASC LIMIT ?",
-                (limit,),
-            ).fetchall()
-            if not rows:
-                return []
-            now = time.time()
-            updates = [(now, row["image_id"]) for row in rows]
-            self._connection.executemany(
-                "UPDATE auto_tag_jobs SET status='processing', updated_at=? WHERE image_id=?",
-                updates,
-            )
-            return rows
+        conn = self.new_connection()
+        try:
+            with conn:
+                rows = conn.execute(
+                    "SELECT j.image_id, i.path FROM auto_tag_jobs j "
+                    "JOIN images i ON i.id = j.image_id "
+                    "WHERE j.status = 'pending' ORDER BY j.queued_at ASC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                if not rows:
+                    return []
+                now = time.time()
+                conn.executemany(
+                    "UPDATE auto_tag_jobs SET status='processing', updated_at=? WHERE image_id=?",
+                    [(now, row["image_id"]) for row in rows],
+                )
+                return rows
+        finally:
+            conn.close()
 
     def _execute_auto_job_update(self, sql: str, params: Sequence[object]) -> None:
         conn = self.new_connection()
