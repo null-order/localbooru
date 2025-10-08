@@ -1,13 +1,22 @@
 const searchBox = document.getElementById('search');
+const searchClearBtn = document.getElementById('search-clear');
 const gridEl = document.getElementById('grid');
 const statusEl = document.getElementById('status');
-const clipWidget = document.getElementById('clip-widget');
+const sidebarEl = document.getElementById('sidebar');
+const sidebarToggleBtn = document.getElementById('sidebar-toggle');
+const statusCardEl = document.getElementById('status-card');
+const statusWrapperEl = document.getElementById('status-wrapper');
+const clipStatusSection = document.getElementById('clip-status');
 const clipSummary = document.getElementById('clip-summary');
 const clipProgressBar = document.getElementById('clip-progress-bar');
 const clipToggleBtn = document.getElementById('clip-toggle');
 const clipSearchInput = document.getElementById('clip-query');
-const clipSearchButton = document.getElementById('clip-search');
 const clipSearchClear = document.getElementById('clip-clear');
+const autoStatusSection = document.getElementById('auto-status');
+const autoSummary = document.getElementById('auto-summary');
+const autoErrorsList = document.getElementById('auto-errors');
+const autoProgressBar = document.getElementById('auto-progress-bar');
+const toastStack = document.getElementById('toast-stack');
 const dropOverlay = document.getElementById('drop-overlay');
 const loadMoreBtn = document.getElementById('load-more');
 const suggestionsEl = document.getElementById('tag-suggestions');
@@ -30,7 +39,7 @@ const detailCounter = document.getElementById('detail-counter');
 const detailCloseBtn = document.getElementById('detail-close');
 const detailSimilarBtn = document.getElementById('detail-similar');
 if (detailSimilarBtn) detailSimilarBtn.disabled = true;
-const hideUCCheckbox = document.getElementById('hide-uc');
+const hideUCToggleBtn = document.getElementById('toggle-uc');
 const sentinel = document.getElementById('scroll-sentinel');
 const detailHotspots = document.getElementById('detail-hotspots');
 const copyPositiveBtn = document.getElementById('copy-positive');
@@ -39,12 +48,16 @@ const positivePreview = document.getElementById('positive-preview');
 const negativePreview = document.getElementById('negative-preview');
 const positiveBlock = document.getElementById('prompt-positive-block');
 const negativeBlock = document.getElementById('prompt-negative-block');
+if (autoProgressBar) {
+    autoProgressBar.style.width = '0%';
+    autoProgressBar.dataset.label = '0%';
+}
 const facetLookup = new Map();
 const tagToCards = new Map();
 const cardElements = new Map();
 let suggestionItems = [];
 let suggestionIndex = -1;
-const headerEl = document.querySelector('header');
+const headerEl = document.querySelector('.app-header');
 const PAGE_SIZE = 40;
 const TAG_FETCH_BATCH_SIZE = 80;
 let currentHistoryState = { query: '', detail: null, pos: 0, clip: null };
@@ -72,7 +85,7 @@ let currentClipToken = null;
 
 let currentDetailId = null;
 let currentDetailIndex = -1;
-let hideUCTags = hideUCCheckbox.checked;
+let hideUCTags = true;
 let facetCache = [];
 let autoObserver = null;
 let currentPrompts = { positive: '', negative: '' };
@@ -83,6 +96,9 @@ let pendingDetailId = null;
 let clipSearchTimer = null;
 const CLIP_SEARCH_DEBOUNCE = 400;
 let dragCounter = 0;
+const desktopMediaQuery = window.matchMedia('(min-width: 1101px)');
+let sidebarVisible = desktopMediaQuery.matches;
+let statusCardVisible = true;
 
 function getActiveClipToken() {
     if (!clipModeActive) {
@@ -192,6 +208,246 @@ function buildClipFacetSummaryFromImageTags(imageTagMap) {
         }
         return a.tag.localeCompare(b.tag);
     });
+}
+
+const activeToasts = new Map();
+const toastSuppressions = new Map();
+
+function toastFingerprint(title, body) {
+    return `${title || ''}|${body || ''}`;
+}
+
+function isToastSuppressed(key, fingerprint) {
+    const state = toastSuppressions.get(key);
+    return !!state && state.suppressed && state.fingerprint === fingerprint;
+}
+
+function showToast(key, { title, body, variant = 'info', autoDismiss = 0, onDismiss = null } = {}) {
+    if (!toastStack) return;
+    const fingerprint = toastFingerprint(title, body);
+    if (isToastSuppressed(key, fingerprint)) {
+        return;
+    }
+    toastSuppressions.set(key, { suppressed: false, fingerprint });
+    let toastEntry = activeToasts.get(key);
+    if (!toastEntry) {
+        const toastEl = document.createElement('div');
+        toastEl.className = `toast${variant === 'error' ? ' toast-error' : ''}`;
+        toastEl.dataset.key = key;
+        toastEl.innerHTML = `
+            <div class="toast-title">
+                <span>${title || ''}</span>
+                <button type="button" class="toast-dismiss" aria-label="Dismiss">×</button>
+            </div>
+            <div class="toast-body">${body || ''}</div>
+        `;
+        toastStack.appendChild(toastEl);
+        const dismissBtn = toastEl.querySelector('.toast-dismiss');
+        if (dismissBtn) {
+            dismissBtn.addEventListener('click', () => dismissToast(key, { manual: true }));
+        }
+        toastEntry = { element: toastEl, timer: null, onDismiss, fingerprint };
+        activeToasts.set(key, toastEntry);
+    } else {
+        toastEntry.element.classList.toggle('toast-error', variant === 'error');
+        const titleEl = toastEntry.element.querySelector('.toast-title span');
+        if (titleEl) titleEl.textContent = title || '';
+        const bodyEl = toastEntry.element.querySelector('.toast-body');
+        if (bodyEl) bodyEl.textContent = body || '';
+        toastEntry.onDismiss = onDismiss;
+        toastEntry.fingerprint = fingerprint;
+    }
+    if (toastEntry.timer) {
+        clearTimeout(toastEntry.timer);
+        toastEntry.timer = null;
+    }
+    if (autoDismiss > 0) {
+        toastEntry.timer = setTimeout(() => dismissToast(key), autoDismiss);
+    }
+}
+
+function dismissToast(key, options = {}) {
+    const { manual = false } = options;
+    const toastEntry = activeToasts.get(key);
+    if (!toastEntry) {
+        if (!manual) {
+            toastSuppressions.delete(key);
+        }
+        return;
+    }
+    if (toastEntry.timer) {
+        clearTimeout(toastEntry.timer);
+    }
+    toastEntry.element.classList.add('toast-leave');
+    const removalDelay = 160;
+    setTimeout(() => {
+        if (toastEntry.element && toastEntry.element.parentElement) {
+            toastEntry.element.parentElement.removeChild(toastEntry.element);
+        }
+    }, removalDelay);
+    activeToasts.delete(key);
+    if (manual) {
+        toastSuppressions.set(key, { suppressed: true, fingerprint: toastEntry.fingerprint || '' });
+    } else {
+        toastSuppressions.delete(key);
+    }
+    if (typeof toastEntry.onDismiss === 'function') {
+        toastEntry.onDismiss();
+    }
+}
+
+function truncateLabel(label, maxLength = 42) {
+    if (typeof label !== 'string') return '';
+    if (label.length <= maxLength) return label;
+    const head = label.slice(0, Math.max(0, maxLength - 10));
+    const tail = label.slice(-8);
+    return `${head}…${tail}`;
+}
+
+function deriveFilename(item) {
+    if (!item) return '';
+    if (typeof item.name === 'string' && item.name) {
+        const parts = item.name.split(/[\\/]/);
+        return parts.pop() || item.name;
+    }
+    if (typeof item.path === 'string' && item.path) {
+        const segments = item.path.split(/[\\/]/);
+        return segments.pop() || item.path;
+    }
+    return '';
+}
+
+function getFallbackLabel(item) {
+    const filename = deriveFilename(item);
+    return truncateLabel(filename || 'untitled', 38);
+}
+
+function syncClearButton(input, button) {
+    if (!button) return;
+    if (input && input.value && input.value.trim()) {
+        button.classList.add('input-action-visible');
+    } else {
+        button.classList.remove('input-action-visible');
+    }
+}
+
+function applySidebarState() {
+    if (!sidebarEl) return;
+    const isDesktop = desktopMediaQuery.matches;
+    if (isDesktop) {
+        sidebarVisible = true;
+        sidebarEl.classList.remove('sidebar-open');
+        sidebarEl.classList.remove('collapsed');
+    } else {
+        sidebarEl.classList.remove('collapsed');
+        sidebarEl.classList.toggle('sidebar-open', sidebarVisible);
+    }
+    setStatusCardExpanded(statusCardVisible, { animate: false });
+    if (sidebarToggleBtn) {
+        const expanded = isDesktop ? statusCardVisible : sidebarVisible;
+        sidebarToggleBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        sidebarToggleBtn.classList.toggle('is-open', expanded);
+    }
+}
+
+if (sidebarToggleBtn) {
+    sidebarToggleBtn.addEventListener('click', () => {
+        if (desktopMediaQuery.matches) {
+            setStatusCardExpanded(!statusCardVisible, { animate: true });
+        } else {
+            sidebarVisible = !sidebarVisible;
+            if (sidebarVisible) {
+                setStatusCardExpanded(true, { animate: false });
+            }
+        }
+        applySidebarState();
+    });
+}
+
+desktopMediaQuery.addEventListener('change', (event) => {
+    if (event.matches) {
+        sidebarVisible = true;
+    } else {
+        sidebarVisible = false;
+    }
+    applySidebarState();
+});
+
+applySidebarState();
+
+function updateStatusCardHeight() {
+    if (!statusWrapperEl || !statusCardEl) return;
+    if (!statusCardVisible) return;
+    statusWrapperEl.style.maxHeight = 'none';
+    statusWrapperEl.style.overflow = 'visible';
+}
+
+function setStatusCardExpanded(expand, { animate = true } = {}) {
+    statusCardVisible = !!expand;
+    if (!statusWrapperEl || !statusCardEl) return;
+    const wrapper = statusWrapperEl;
+    const content = statusCardEl;
+
+    if (statusCardVisible) {
+        wrapper.classList.remove('collapsed');
+        const target = content.scrollHeight;
+        if (!animate) {
+            wrapper.style.transition = 'none';
+            wrapper.style.maxHeight = 'none';
+            wrapper.style.opacity = '1';
+            wrapper.style.overflow = 'visible';
+            requestAnimationFrame(() => {
+                wrapper.style.transition = '';
+            });
+            return;
+        }
+        wrapper.style.overflow = 'hidden';
+        wrapper.style.transition = 'none';
+        wrapper.style.maxHeight = '0px';
+        wrapper.style.opacity = '0';
+        requestAnimationFrame(() => {
+            wrapper.style.transition = 'max-height 0.28s ease, opacity 0.24s ease';
+            wrapper.style.maxHeight = `${target}px`;
+            wrapper.style.opacity = '1';
+        });
+        const onEnd = (event) => {
+            if (event.propertyName === 'max-height') {
+                wrapper.style.maxHeight = 'none';
+                wrapper.style.overflow = 'visible';
+                wrapper.removeEventListener('transitionend', onEnd);
+            }
+        };
+        wrapper.addEventListener('transitionend', onEnd);
+    } else {
+        if (!animate) {
+            wrapper.style.transition = 'none';
+            wrapper.style.maxHeight = '0px';
+            wrapper.style.opacity = '0';
+            wrapper.classList.add('collapsed');
+            requestAnimationFrame(() => {
+                wrapper.style.transition = '';
+            });
+            return;
+        }
+        const current = content.scrollHeight;
+        wrapper.style.overflow = 'hidden';
+        wrapper.style.transition = 'none';
+        wrapper.style.maxHeight = `${current}px`;
+        wrapper.style.opacity = '1';
+        requestAnimationFrame(() => {
+            wrapper.style.transition = 'max-height 0.24s ease, opacity 0.24s ease';
+            wrapper.style.maxHeight = '0px';
+            wrapper.style.opacity = '0';
+        });
+        const onEnd = (event) => {
+            if (event.propertyName === 'max-height') {
+                wrapper.classList.add('collapsed');
+                wrapper.style.overflow = 'hidden';
+                wrapper.removeEventListener('transitionend', onEnd);
+            }
+        };
+        wrapper.addEventListener('transitionend', onEnd);
+    }
 }
 
 function applyTagsToCard(imageId, tags) {
@@ -320,7 +576,6 @@ async function startClipUploadSearch(file) {
     lastAnchorIndex = 0;
     statusEl.textContent = 'Processing image…';
     searchState.loading = true;
-    if (clipSearchButton) clipSearchButton.disabled = true;
     if (clipSearchClear) clipSearchClear.disabled = true;
     if (detailSimilarBtn) detailSimilarBtn.disabled = true;
 
@@ -408,7 +663,6 @@ async function startClipUploadSearch(file) {
         currentClipToken = null;
     } finally {
         searchState.loading = false;
-        if (clipSearchButton) clipSearchButton.disabled = false;
         if (clipSearchClear) clipSearchClear.disabled = false;
         if (detailSimilarBtn) detailSimilarBtn.disabled = false;
         scheduleScrollSave();
@@ -551,19 +805,36 @@ function formatFileSize(bytes) {
 
 
 function renderCard(item) {
-    const meta = `${item.width ?? '–'}×${item.height ?? '–'} • seed ${item.seed ?? '–'} • ${item.model ?? ''}`;
+    const width = Number.isFinite(item.width) ? item.width : '–';
+    const height = Number.isFinite(item.height) ? item.height : '–';
+    const fallback = getFallbackLabel(item);
+    const metaParts = [`${width}×${height}`];
+    if (item.seed) {
+        metaParts.push(`Seed ${item.seed}`);
+    } else {
+        metaParts.push(fallback);
+    }
+    if (item.model) {
+        metaParts.push(item.model);
+    } else if (item.seed) {
+        metaParts.push(fallback);
+    }
+    const meta = metaParts.join(' • ');
     const thumb = item.thumb_url || item.file_url;
     const ratio = item.width && item.height ? `${item.width} / ${item.height}` : '2 / 3';
     const scoreLine = typeof item.score === 'number' ? `<div class="clip-score">score ${item.score.toFixed(3)}</div>` : '';
     return `
     <article class="card" data-id="${item.id}">
         <div class="image-wrap" style="aspect-ratio:${ratio};">
-            <img src="${thumb}" data-full="${item.file_url}" loading="lazy" alt="${item.name}">
+            <img src="${thumb}" data-full="${item.file_url}" loading="lazy" alt="${fallback}">
         </div>
         <div class="info">
             <div class="info-row">
                 <div class="meta">${meta}</div>
-                <button class="similar-icon" data-id="${item.id}" title="Find similar" aria-label="Find similar">≈</button>
+                <button class="similar-button" data-id="${item.id}" title="Find similar" aria-label="Find similar">
+                    <span class="icon" aria-hidden="true">≈</span>
+                    <span class="sr-only">Find similar</span>
+                </button>
             </div>
             ${scoreLine}
         </div>
@@ -583,7 +854,7 @@ function registerCardElement(cardEl, item) {
     cardEl.addEventListener('focus', () => {
         highlightFromCard(item.id);
     });
-    const similarBtn = cardEl.querySelector('.similar-icon');
+    const similarBtn = cardEl.querySelector('.similar-button');
     if (similarBtn) {
         similarBtn.addEventListener('click', (event) => {
             event.stopPropagation();
@@ -786,6 +1057,7 @@ async function runClipSearch(
     }
     if (updateInput !== undefined && clipSearchInput) {
         clipSearchInput.value = updateInput;
+        syncClearButton(clipSearchInput, clipSearchClear);
     }
 
     clipModeActive = true;
@@ -815,7 +1087,6 @@ async function runClipSearch(
         statusEl.textContent = 'CLIP search…';
     }
     if (detailSimilarBtn) detailSimilarBtn.disabled = true;
-    if (clipSearchButton) clipSearchButton.disabled = true;
     if (clipSearchClear) clipSearchClear.disabled = true;
 
     const payload = {
@@ -936,7 +1207,6 @@ async function runClipSearch(
         statusEl.textContent = 'CLIP search failed';
     } finally {
         searchState.loading = false;
-        if (clipSearchButton) clipSearchButton.disabled = false;
         if (clipSearchClear) clipSearchClear.disabled = false;
         if (detailSimilarBtn) detailSimilarBtn.disabled = false;
         updateStatus();
@@ -1121,17 +1391,37 @@ function commitSearch(rawValue, { pushHistory = true } = {}) {
     if (searchBox.value !== normalized) {
         searchBox.value = normalized;
     }
+    syncClearButton(searchBox, searchClearBtn);
     pendingScrollIndex = 0;
     scrollRestorePending = true;
     lastAnchorIndex = 0;
     requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
-    if (nextQuery === lastQuery) {
+    const sameQuery = nextQuery === lastQuery;
+    lastQuery = nextQuery;
+    if (clipModeActive && lastClipPayload) {
+        const payload = {
+            ...lastClipPayload,
+            tagQuery: nextQuery,
+        };
+        if (lastClipPayload.clipToken) {
+            payload.clipToken = lastClipPayload.clipToken;
+        }
+        lastClipPayload = payload;
+        const clipToken = getActiveClipToken();
+        if (pushHistory) {
+            pushHistoryState({ query: nextQuery, detail: null, pos: 0, clip: clipToken }, { replace: sameQuery });
+        } else {
+            pushHistoryState({ query: nextQuery, detail: null, pos: 0, clip: clipToken }, { replace: true });
+        }
+        runClipSearch(payload, { append: false, updateHistory: false });
+        return;
+    }
+    if (sameQuery) {
         if (pushHistory) {
             pushHistoryState({ query: nextQuery, detail: null, pos: 0, clip: null }, { replace: true });
         }
         return;
     }
-    lastQuery = nextQuery;
     if (pushHistory) {
         pushHistoryState({ query: nextQuery, detail: null, pos: 0, clip: null });
     } else {
@@ -1154,12 +1444,32 @@ function applyToken(token) {
 }
 
 searchBox.addEventListener('input', () => {
+    syncClearButton(searchBox, searchClearBtn);
     maybeSuggest();
 });
 
 searchBox.addEventListener('focus', () => {
+    syncClearButton(searchBox, searchClearBtn);
     maybeSuggest();
 });
+
+searchBox.addEventListener('blur', () => {
+    setTimeout(() => {
+        suggestionsEl.style.display = 'none';
+        suggestionItems = [];
+        suggestionIndex = -1;
+    }, 120);
+});
+
+if (searchClearBtn) {
+    searchClearBtn.addEventListener('click', () => {
+        suggestionsEl.style.display = 'none';
+        suggestionItems = [];
+        suggestionIndex = -1;
+        commitSearch('');
+        searchBox.focus();
+    });
+}
 
 searchBox.addEventListener('keydown', async (event) => {
     if (event.key === 'ArrowDown') {
@@ -1218,12 +1528,15 @@ searchBox.addEventListener('keydown', async (event) => {
     }
 });
 
-document.getElementById('clear').addEventListener('click', () => {
-    suggestionsEl.style.display = 'none';
-    suggestionItems = [];
-    suggestionIndex = -1;
-    commitSearch('');
-});
+const legacyClearBtn = document.getElementById('clear');
+if (legacyClearBtn) {
+    legacyClearBtn.addEventListener('click', () => {
+        suggestionsEl.style.display = 'none';
+        suggestionItems = [];
+        suggestionIndex = -1;
+        commitSearch('');
+    });
+}
 
 loadMoreBtn.addEventListener('click', () => {
     if (clipModeActive) {
@@ -1235,17 +1548,6 @@ loadMoreBtn.addEventListener('click', () => {
     }
 });
 
-if (clipSearchButton) {
-    clipSearchButton.addEventListener('click', () => {
-        if (!clipEnabled) return;
-        const rawQuery = clipSearchInput ? clipSearchInput.value : '';
-        if (!rawQuery.trim() && lastClipPayload) {
-            runClipSearch(lastClipPayload, { append: false });
-        } else {
-            runClipSearch({ query: rawQuery, tagQuery: searchBox.value.trim() });
-        }
-    });
-}
 if (clipSearchInput) {
     clipSearchInput.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
@@ -1261,6 +1563,7 @@ if (clipSearchInput) {
     });
     clipSearchInput.addEventListener('input', () => {
         if (!clipEnabled) return;
+        syncClearButton(clipSearchInput, clipSearchClear);
         if (clipSearchTimer) {
             clearTimeout(clipSearchTimer);
             clipSearchTimer = null;
@@ -1285,10 +1588,14 @@ if (clipSearchInput) {
             }
         }, CLIP_SEARCH_DEBOUNCE);
     });
+    syncClearButton(clipSearchInput, clipSearchClear);
 }
 if (clipSearchClear) {
     clipSearchClear.addEventListener('click', () => {
-        if (clipSearchInput) clipSearchInput.value = '';
+        if (clipSearchInput) {
+            clipSearchInput.value = '';
+            syncClearButton(clipSearchInput, clipSearchClear);
+        }
         if (clipModeActive && !searchState.loading) {
             if (detailOverlay.classList.contains('active')) {
                 closeDetail({ skipHistory: true });
@@ -1308,13 +1615,27 @@ if (clipSearchClear) {
             clipTotal = 0;
             pushHistoryState({ clip: null }, { replace: true });
         }
+        clipSearchInput?.focus();
     });
 }
 
-hideUCCheckbox.addEventListener('change', () => {
-    hideUCTags = hideUCCheckbox.checked;
-    renderFacets(facetCache);
-});
+if (hideUCToggleBtn) {
+    hideUCToggleBtn.addEventListener('click', () => {
+        hideUCTags = !hideUCTags;
+        hideUCToggleBtn.setAttribute('aria-pressed', hideUCTags ? 'true' : 'false');
+        hideUCToggleBtn.textContent = hideUCTags ? 'UC Hidden' : 'UC Visible';
+        renderFacets(facetCache);
+        if (detailNegSection) {
+            if (hideUCTags) {
+                detailNegSection.style.display = 'none';
+            } else if (detailNegTags.children.length) {
+                detailNegSection.style.display = '';
+            }
+        }
+    });
+    hideUCToggleBtn.textContent = hideUCTags ? 'UC Hidden' : 'UC Visible';
+    hideUCToggleBtn.setAttribute('aria-pressed', hideUCTags ? 'true' : 'false');
+}
 
 facetListEl.addEventListener('mouseleave', () => clearHighlights());
 gridEl.addEventListener('mouseleave', () => clearHighlights());
@@ -1401,12 +1722,34 @@ detailOverlay.addEventListener('click', (event) => {
 
 detailPrevBtn.addEventListener('click', () => showSibling(-1));
 detailNextBtn.addEventListener('click', () => showSibling(1));
+detailImage.addEventListener('click', () => {
+    if (!detailImage.src) return;
+    window.open(detailImage.src, '_blank', 'noopener');
+});
 
 window.addEventListener('keydown', (event) => {
-    if (!detailOverlay.classList.contains('active')) return;
     if (event.key === 'Escape') {
-        closeDetail();
-    } else if (event.key === 'ArrowLeft') {
+        if (detailOverlay.classList.contains('active')) {
+            closeDetail();
+            event.preventDefault();
+            return;
+        }
+        if (desktopMediaQuery.matches) {
+            if (statusCardVisible) {
+                statusCardVisible = false;
+                applySidebarState();
+                event.preventDefault();
+                return;
+            }
+        } else if (sidebarVisible) {
+            sidebarVisible = false;
+            applySidebarState();
+            event.preventDefault();
+            return;
+        }
+    }
+    if (!detailOverlay.classList.contains('active')) return;
+    if (event.key === 'ArrowLeft') {
         showSibling(-1);
     } else if (event.key === 'ArrowRight') {
         showSibling(1);
@@ -1541,19 +1884,26 @@ async function openDetail(id, options = {}) {
         copyNegativeBtn.disabled = !hasNegative;
         positivePreview.textContent = hasPositive ? currentPrompts.positive : '—';
         negativePreview.textContent = hasNegative ? currentPrompts.negative : '—';
+        const fallbackLabel = getFallbackLabel(item);
+        const displayModel = item.model || fallbackLabel;
+        const displaySeed = item.seed || fallbackLabel;
         const titleParts = [];
         if (item.model) titleParts.push(item.model);
         if (item.seed) titleParts.push(`Seed ${item.seed}`);
-        detailTitle.textContent = titleParts.join(' • ') || 'Image Details';
+        if (!titleParts.length) {
+            titleParts.push(fallbackLabel);
+        }
+        detailTitle.textContent = titleParts.join(' • ');
         detailImage.src = item.file_url;
+        detailImage.alt = fallbackLabel;
         detailImage.parentElement.style.removeProperty('--image-aspect');
         detailImage.parentElement.style.removeProperty('aspect-ratio');
         detailImage.style.removeProperty('aspect-ratio');
         detailInfo.innerHTML = `
             <h3>Info</h3>
             <div class="info-grid">
-                <div class="info-chip"><span>Model</span><strong>${item.model ?? '–'}</strong></div>
-                <div class="info-chip"><span>Seed</span><strong>${item.seed ?? '–'}</strong></div>
+                <div class="info-chip"><span>Model</span><strong>${displayModel}</strong></div>
+                <div class="info-chip"><span>Seed</span><strong>${displaySeed}</strong></div>
                 <div class="info-chip"><span>Dimensions</span><strong>${item.width ?? '–'}×${item.height ?? '–'}</strong></div>
                 <div class="info-chip"><span>File Size</span><strong>${formatFileSize(item.size)}</strong></div>
             </div>
@@ -1575,6 +1925,7 @@ async function openDetail(id, options = {}) {
         currentDetailIndex = searchState.index.has(detailId) ? searchState.index.get(detailId) : -1;
         updateDetailControls();
         detailOverlay.classList.add('active');
+        detailOverlay.setAttribute('aria-hidden', 'false');
         const anchorIndexForHistory = scrollRestorePending && pendingScrollIndex !== null ? pendingScrollIndex : getAnchorIndex();
         if (pushState) {
             pushHistoryState({ query: lastQuery, detail: detailId, pos: anchorIndexForHistory, clip: clipTokenForHistory });
@@ -1595,7 +1946,11 @@ function renderDetailTags(tags) {
         span.className = 'tag-pill';
         span.dataset.kind = tag.kind;
         span.dataset.emphasis = tag.emphasis;
-        span.dataset.weight = tag.weight.toFixed(1);
+        if (Number.isFinite(tag.weight)) {
+            span.dataset.weight = Number(tag.weight).toFixed(1);
+        } else {
+            span.dataset.weight = '';
+        }
         const label = tag.count ? `${tag.tag} (${tag.count})` : tag.tag;
         span.textContent = label;
         span.addEventListener('click', () => {
@@ -1619,7 +1974,7 @@ function renderDetailTags(tags) {
             detailTags.appendChild(span);
         }
     });
-    detailNegSection.style.display = hasNeg ? '' : 'none';
+    detailNegSection.style.display = hasNeg && !hideUCTags ? '' : 'none';
 }
 
 function renderCharacterDetails(characters) {
@@ -1762,6 +2117,7 @@ function closeDetail({ skipHistory = false } = {}) {
         return;
     }
     detailOverlay.classList.remove('active');
+    detailOverlay.setAttribute('aria-hidden', 'true');
     if (detailSimilarBtn) {
         detailSimilarBtn.disabled = true;
         detailSimilarBtn.dataset.id = '';
@@ -1811,6 +2167,7 @@ function handleHistoryState(state) {
     if (searchBox.value !== nextQuery) {
         searchBox.value = nextQuery;
     }
+    syncClearButton(searchBox, searchClearBtn);
 
     pendingDetailId = targetDetail;
     pendingScrollIndex = nextPos !== null ? nextPos : 0;
@@ -1826,6 +2183,7 @@ function handleHistoryState(state) {
             clipOffset = 0;
             clipTotal = 0;
             if (clipSearchInput) clipSearchInput.value = '';
+            syncClearButton(clipSearchInput, clipSearchClear);
             pushHistoryState({ clip: null }, { replace: true });
         } else {
             const wasClipMode = clipModeActive;
@@ -1834,6 +2192,7 @@ function handleHistoryState(state) {
             lastQuery = nextQuery;
             if (clipSearchInput) {
                 clipSearchInput.value = clipPayload.updateInput || '';
+                syncClearButton(clipSearchInput, clipSearchClear);
             }
 
             if (targetDetail === null && detailOverlay.classList.contains('active')) {
@@ -1880,6 +2239,7 @@ function handleHistoryState(state) {
         clipOffset = 0;
         clipTotal = 0;
         if (clipSearchInput) clipSearchInput.value = '';
+        syncClearButton(clipSearchInput, clipSearchClear);
     }
 
     if (targetDetail === null && detailOverlay.classList.contains('active')) {
@@ -1925,6 +2285,8 @@ lastQuery = normalizedInitialState.query;
 if (searchBox.value !== lastQuery) {
     searchBox.value = lastQuery;
 }
+syncClearButton(searchBox, searchClearBtn);
+syncClearButton(clipSearchInput, clipSearchClear);
 pendingDetailId = normalizedInitialState.detail;
 pendingScrollIndex = normalizedInitialState.pos;
 scrollRestorePending = pendingScrollIndex > 0;
@@ -1959,72 +2321,203 @@ if ('IntersectionObserver' in window) {
 detailImage.addEventListener('load', () => positionHotspots());
 window.addEventListener('resize', () => positionHotspots());
 async function pollClipStatus() {
-  if (!clipWidget) return;
-  try {
-    const res = await fetch('/api/status/clip');
-    if (!res.ok) throw new Error('status ' + res.status);
-    const data = await res.json();
-    const enabled = data.enabled !== false;
-    clipEnabled = enabled;
-    if (!enabled) {
-      clipWidget.classList.add('clip-status-error');
-      clipSummary.textContent = 'CLIP disabled';
-      if (clipToggleBtn) {
-        clipToggleBtn.hidden = true;
-        clipToggleBtn.dataset.state = 'paused';
-      }
-      if (clipSearchInput) clipSearchInput.disabled = true;
-      if (clipSearchButton) clipSearchButton.disabled = true;
-      if (clipSearchClear) clipSearchClear.disabled = true;
-      if (detailSimilarBtn) {
-        detailSimilarBtn.disabled = true;
-        detailSimilarBtn.dataset.id = '';
-      }
-      return;
-    }
-    if (clipSearchInput) clipSearchInput.disabled = false;
-    if (clipSearchClear && !searchState.loading) clipSearchClear.disabled = false;
-    if (clipSearchButton && !searchState.loading) clipSearchButton.disabled = false;
-    if (detailSimilarBtn && Number.isFinite(currentDetailId)) detailSimilarBtn.disabled = false;
+    if (!clipSummary) return;
+    try {
+        const res = await fetch('/api/status/clip');
+        if (!res.ok) throw new Error(`status ${res.status}`);
+        const data = await res.json();
+        const enabled = data.enabled !== false;
+        clipEnabled = enabled;
+        if (!enabled) {
+            clipStatusSection?.classList.remove('status-error');
+            clipStatusSection?.classList.add('status-disabled');
+            clipSummary.textContent = 'CLIP disabled';
+            clipProgressBar.style.width = '0%';
+            clipProgressBar.dataset.label = '0%';
+            if (clipToggleBtn) {
+                clipToggleBtn.hidden = true;
+                clipToggleBtn.dataset.state = 'paused';
+            }
+            if (clipSearchInput) clipSearchInput.disabled = true;
+            if (clipSearchClear) clipSearchClear.disabled = true;
+            syncClearButton(clipSearchInput, clipSearchClear);
+            if (detailSimilarBtn) {
+                detailSimilarBtn.disabled = true;
+                detailSimilarBtn.dataset.id = '';
+            }
+            dismissToast('clip-error');
+            requestAnimationFrame(updateStatusCardHeight);
+            return;
+        }
 
-    const total = data.total || 0;
-    const completed = data.completed || 0;
-    const processing = data.processing || 0;
-    const queued = data.queued || Math.max(total - completed - processing, 0);
-    const percent = total ? Math.round((completed / total) * 100) : 0;
-    clipProgressBar.style.width = `${percent}%`;
-    clipProgressBar.dataset.label = `${percent}%`;
-    clipSummary.textContent = `State: ${data.state} • ${completed}/${total} done`;
-    if (clipToggleBtn) {
-      clipToggleBtn.hidden = !total;
-      clipToggleBtn.textContent = data.state === 'paused' ? 'Resume' : 'Pause';
-      clipToggleBtn.dataset.state = data.state;
+        clipStatusSection?.classList.remove('status-disabled');
+        if (clipSearchInput) clipSearchInput.disabled = false;
+        if (clipSearchClear && !searchState.loading) clipSearchClear.disabled = false;
+        syncClearButton(clipSearchInput, clipSearchClear);
+        if (detailSimilarBtn && Number.isFinite(currentDetailId)) detailSimilarBtn.disabled = false;
+
+        const total = Number(data.total) || 0;
+        const completed = Number(data.completed) || 0;
+        const processing = Number(data.processing) || 0;
+        const queued = Number(data.queued) || Math.max(total - completed - processing, 0);
+        const percent = total ? Math.round((completed / total) * 100) : 0;
+        clipProgressBar.style.width = `${percent}%`;
+        clipProgressBar.dataset.label = `${percent}%`;
+        const stateLabel = typeof data.state === 'string' ? data.state : 'idle';
+        clipSummary.textContent = `State: ${stateLabel} • ${completed}/${total} done • ${processing} processing • ${queued} queued`;
+        if (clipToggleBtn) {
+            clipToggleBtn.hidden = !total;
+            clipToggleBtn.textContent = stateLabel === 'paused' ? 'Resume' : 'Pause';
+            clipToggleBtn.dataset.state = stateLabel;
+        }
+
+        const errors = Array.isArray(data.error_sample) ? data.error_sample : [];
+        if (errors.length) {
+            const latest = String(errors[errors.length - 1]);
+            const fingerprint = toastFingerprint('CLIP indexer issue', latest);
+            if (isToastSuppressed('clip-error', fingerprint)) {
+                clipStatusSection?.classList.remove('status-error');
+            } else {
+                clipStatusSection?.classList.add('status-error');
+                showToast('clip-error', {
+                    title: 'CLIP indexer issue',
+                    body: latest,
+                    variant: 'error',
+                    onDismiss: () => clipStatusSection?.classList.remove('status-error'),
+                });
+            }
+        } else {
+            clipStatusSection?.classList.remove('status-error');
+            dismissToast('clip-error');
+            requestAnimationFrame(updateStatusCardHeight);
+        }
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        clipSummary.textContent = 'CLIP status unavailable';
+        clipStatusSection?.classList.remove('status-disabled');
+        clipStatusSection?.classList.add('status-error');
+        showToast('clip-error', {
+            title: 'CLIP status unavailable',
+            body: message,
+            variant: 'error',
+            onDismiss: () => clipStatusSection?.classList.remove('status-error'),
+        });
+        requestAnimationFrame(updateStatusCardHeight);
     }
-    clipWidget.classList.remove('clip-status-error');
-    if (Array.isArray(data.error_sample) && data.error_sample.length) {
-      clipWidget.classList.add('clip-status-error');
-      clipSummary.textContent += ` • Issues: ${data.error_sample[data.error_sample.length - 1]}`;
+}
+
+async function pollAutoStatus() {
+    if (!autoStatusSection || !autoSummary || !autoErrorsList) return;
+    try {
+        const res = await fetch('/api/status/auto');
+        autoStatusSection.hidden = false;
+        if (res.status === 404) {
+            autoStatusSection.classList.add('status-disabled');
+            autoStatusSection.classList.remove('status-error');
+            autoSummary.textContent = 'Auto-tag status unavailable';
+            autoErrorsList.innerHTML = '';
+            if (autoProgressBar) {
+                autoProgressBar.style.width = '0%';
+                autoProgressBar.dataset.label = '0%';
+            }
+            dismissToast('auto-error');
+            requestAnimationFrame(updateStatusCardHeight);
+            return;
+        }
+        if (!res.ok) throw new Error(`status ${res.status}`);
+        const data = await res.json();
+        const enabled = data.enabled !== false;
+        const stateLabel = typeof data.state === 'string' ? data.state : 'idle';
+        const total = Number(data.total) || 0;
+        const completed = Number(data.completed) || 0;
+        const processing = Number(data.processing) || 0;
+        const queued = Number(data.queued) || Math.max(total - completed - processing, 0);
+        const errors = Array.isArray(data.error_sample) ? data.error_sample : [];
+
+        if (!enabled) {
+            autoStatusSection.classList.add('status-disabled');
+            autoStatusSection.classList.remove('status-error');
+            autoSummary.textContent = 'Auto-tagging disabled';
+            autoErrorsList.innerHTML = '';
+            if (autoProgressBar) {
+                autoProgressBar.style.width = '0%';
+                autoProgressBar.dataset.label = '0%';
+            }
+            dismissToast('auto-error');
+            requestAnimationFrame(updateStatusCardHeight);
+            return;
+        }
+
+        autoStatusSection.classList.remove('status-disabled');
+
+        autoSummary.textContent = `State: ${stateLabel} • ${completed}/${total} done • ${processing} processing • ${queued} queued`;
+        if (autoProgressBar) {
+            const autoPercent = total ? Math.round((completed / total) * 100) : 0;
+            autoProgressBar.style.width = `${Math.max(0, Math.min(100, autoPercent))}%`;
+            autoProgressBar.dataset.label = `${autoPercent}%`;
+        }
+        autoErrorsList.innerHTML = '';
+        if (errors.length) {
+            errors.slice(-3).forEach(errMsg => {
+                const li = document.createElement('li');
+                li.textContent = String(errMsg);
+                autoErrorsList.appendChild(li);
+            });
+            const latestAuto = String(errors[errors.length - 1]);
+            const autoFingerprint = toastFingerprint('Auto tagger issues', latestAuto);
+            if (isToastSuppressed('auto-error', autoFingerprint)) {
+                autoStatusSection.classList.remove('status-error');
+            } else {
+                autoStatusSection.classList.add('status-error');
+                showToast('auto-error', {
+                    title: 'Auto tagger issues',
+                    body: latestAuto,
+                    variant: 'error',
+                    onDismiss: () => autoStatusSection.classList.remove('status-error'),
+                });
+            }
+        } else {
+            autoStatusSection.classList.remove('status-error');
+            dismissToast('auto-error');
+        }
+        requestAnimationFrame(updateStatusCardHeight);
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        autoStatusSection.classList.add('status-error');
+        autoStatusSection.classList.remove('status-disabled');
+        autoSummary.textContent = 'Auto-tag status unavailable';
+        if (autoProgressBar) {
+            autoProgressBar.style.width = '0%';
+            autoProgressBar.dataset.label = '0%';
+        }
+        showToast('auto-error', {
+            title: 'Auto-tag status unavailable',
+            body: message,
+            variant: 'error',
+            onDismiss: () => autoStatusSection.classList.remove('status-error'),
+        });
+        requestAnimationFrame(updateStatusCardHeight);
     }
-  } catch (err) {
-    clipSummary.textContent = 'CLIP status unavailable';
-    clipWidget.classList.add('clip-status-error');
-  }
 }
 
 async function toggleClipIndexer() {
-  if (!clipToggleBtn) return;
-  const state = clipToggleBtn.dataset.state;
-  const target = state === 'paused' ? 'resume' : 'pause';
-  try {
-    const res = await fetch(`/api/clip/${target}`, { method: 'POST' });
-    if (!res.ok) throw new Error(res.statusText);
-    setTimeout(pollClipStatus, 300);
-  } catch (err) {
-    clipSummary.textContent = 'Unable to toggle CLIP indexer';
-  }
+    if (!clipToggleBtn) return;
+    const state = clipToggleBtn.dataset.state;
+    const target = state === 'paused' ? 'resume' : 'pause';
+    try {
+        const res = await fetch(`/api/clip/${target}`, { method: 'POST' });
+        if (!res.ok) throw new Error(res.statusText);
+        setTimeout(pollClipStatus, 300);
+    } catch (err) {
+        clipSummary.textContent = 'Unable to toggle CLIP indexer';
+    }
 }
 if (clipToggleBtn) {
-  clipToggleBtn.addEventListener('click', toggleClipIndexer);
+    clipToggleBtn.addEventListener('click', toggleClipIndexer);
 }
-setInterval(pollClipStatus, 2000);
+setInterval(() => {
+    pollClipStatus();
+    pollAutoStatus();
+}, 2000);
 pollClipStatus();
+pollAutoStatus();

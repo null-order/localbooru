@@ -233,6 +233,9 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/status/clip":
             self._handle_clip_status()
             return
+        if path == "/api/status/auto":
+            self._handle_auto_status()
+            return
         if path == "/api/images":
             self._handle_images(parsed.query)
             return
@@ -273,10 +276,27 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def _handle_clip_status(self) -> None:
+        LOGGER.debug("GET /api/status/clip")
         progress: ClipProgress = self.server.progress  # type: ignore[attr-defined]
         payload = progress.snapshot(self.server.db)  # type: ignore[attr-defined]
         config: Optional[LocalBooruConfig] = getattr(self.server, "config", None)
         payload["enabled"] = bool(config and getattr(config, "clip_enabled", False))
+        blob = json.dumps(payload).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(blob)))
+        self.end_headers()
+        self.wfile.write(blob)
+
+    def _handle_auto_status(self) -> None:
+        LOGGER.debug("GET /api/status/auto")
+        auto_progress: Optional[AutoTagProgress] = getattr(self.server, "auto_progress", None)
+        payload: Dict[str, object]
+        if auto_progress is None:
+            payload = {"enabled": False}
+        else:
+            snapshot = auto_progress.snapshot(self.server.db)  # type: ignore[attr-defined]
+            payload = {**snapshot, "enabled": True}
         blob = json.dumps(payload).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")

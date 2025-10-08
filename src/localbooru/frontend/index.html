@@ -6,66 +6,101 @@
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header>
-<input type="search" id="search" placeholder="Search tags… (!tag or -tag to exclude, uc:tag for negative prompts)" autocomplete="off" />
-<div class="controls">
-<button id="clear">Clear</button>
-<label id="hide-uc-label"><input type="checkbox" id="hide-uc" checked> Hide UC tags</label>
-<span id="status"></span>
-</div>
-<div class="clip-search">
-  <input id="clip-query" type="text" placeholder="CLIP search…" autocomplete="off" />
-  <button id="clip-search">Search</button>
-  <button id="clip-clear" class="secondary">Reset</button>
-</div>
-<div class="clip-widget" id="clip-widget">
-  <div class="clip-progress"><div class="clip-progress-bar" id="clip-progress-bar"></div></div>
-  <div class="clip-meta">
-    <span id="clip-summary">CLIP status unavailable</span>
-    <button id="clip-toggle" class="clip-toggle" hidden>Pause</button>
+<header class="app-header">
+  <div class="search-row">
+    <div class="search-field" data-role="tag-search">
+      <label for="search" class="sr-only">Primary tag search</label>
+      <input type="search" id="search" placeholder="Search tags… (!tag or -tag to exclude, uc:tag for negative prompts)" autocomplete="off">
+      <button type="button" class="input-action" id="search-clear" aria-label="Clear tag search">×</button>
+    </div>
+    <div class="search-field" data-role="clip-search">
+      <label for="clip-query" class="sr-only">CLIP search</label>
+      <input type="text" id="clip-query" placeholder="CLIP search…" autocomplete="off">
+      <button type="button" class="input-action" id="clip-clear" aria-label="Clear CLIP search">×</button>
+    </div>
   </div>
-</div>
+  <div class="header-actions">
+    <span id="status"></span>
+    <button id="sidebar-toggle" class="icon-button" type="button" aria-label="Toggle status sidebar">
+      <span class="gear-icon" aria-hidden="true">⚙</span>
+    </button>
+  </div>
 </header>
+<div id="toast-stack" class="toast-stack" aria-live="polite"></div>
 <main>
-<div class="content">
-<div class="grid" id="grid"></div>
-<button id="load-more">Load more</button>
-<div id="scroll-sentinel"></div>
-</div>
-<aside id="facet-panel">
-<h2>Tags</h2>
-<ul id="facet-tags"></ul>
-</aside>
-</main>
-<ul id="tag-suggestions"></ul>
-<div id="detail-overlay">
-  <div id="detail-card">
-    <div class="detail-header">
-      <h2 id="detail-title"></h2>
-      <div class="detail-actions">
-        <button id="detail-similar" class="ghost-btn">Find Similar</button>
-        <button id="detail-close">Close</button>
+  <div class="content">
+    <div class="grid" id="grid"></div>
+    <button id="load-more" type="button">Load more</button>
+    <div id="scroll-sentinel" aria-hidden="true"></div>
+  </div>
+  <aside id="sidebar" aria-label="Status and tag filters">
+    <div id="status-wrapper">
+      <div class="sidebar-card" id="status-card">
+        <div class="sidebar-card-header">
+          <span class="sidebar-card-title">Background Status</span>
+        </div>
+        <div class="status-section" id="clip-status">
+        <div class="status-section-heading">
+          <span>CLIP Indexer</span>
+          <button id="clip-toggle" class="pill-button" type="button" hidden>Pause</button>
+        </div>
+        <div class="progress-track">
+          <div class="progress-bar" id="clip-progress-bar"></div>
+        </div>
+        <div class="status-meta" id="clip-summary">CLIP status unavailable</div>
+        </div>
+        <div class="status-section" id="auto-status">
+          <div class="status-section-heading">
+            <span>Auto Tagger</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-bar" id="auto-progress-bar"></div>
+          </div>
+          <div class="status-meta" id="auto-summary">Auto-tag status unavailable</div>
+          <ul class="status-errors" id="auto-errors"></ul>
+        </div>
       </div>
     </div>
+    </div>
+    <div class="sidebar-card" id="tags-card">
+      <div class="sidebar-card-header">
+        <span class="sidebar-card-title">Tags</span>
+        <button id="toggle-uc" class="pill-toggle" type="button" aria-pressed="true">UC Hidden</button>
+      </div>
+      <ul id="facet-tags"></ul>
+    </div>
+  </aside>
+</main>
+<ul id="tag-suggestions" role="listbox" aria-label="Tag suggestions"></ul>
+<div id="detail-overlay" aria-hidden="true">
+  <div id="detail-card" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+    <button id="detail-close" class="detail-close" type="button" aria-label="Close detail">×</button>
     <div class="detail-body">
       <div class="detail-image">
-        <img id="detail-image" alt="Selected artwork" />
+        <img id="detail-image" alt="Selected artwork">
         <div id="detail-hotspots"></div>
+        <div class="detail-footer">
+          <button id="detail-prev" type="button">⟵ Prev</button>
+          <span id="detail-counter"></span>
+          <button id="detail-next" type="button">Next ⟶</button>
+        </div>
       </div>
       <div class="detail-meta">
+        <button id="detail-similar" class="detail-similar" type="button" aria-label="Find similar via CLIP">≈</button>
+        <h2 id="detail-title"></h2>
         <div class="detail-section info" id="detail-info"></div>
         <div class="detail-section prompts" id="detail-prompts">
           <div class="prompt-block" id="prompt-positive-block">
             <div class="prompt-heading">
               <span>Positive Prompt</span>
-              <button class="copy-btn" id="copy-positive" aria-label="Copy positive prompt" title="Copy positive prompt"><span class="sr-only">Copy positive prompt</span>📋</button>
+              <button class="copy-btn" id="copy-positive" type="button" aria-label="Copy positive prompt" title="Copy positive prompt"><span class="sr-only">Copy positive prompt</span>📋</button>
             </div>
             <p class="prompt-preview" id="positive-preview"></p>
           </div>
           <div class="prompt-block" id="prompt-negative-block">
             <div class="prompt-heading">
               <span>Negative Prompt</span>
-              <button class="copy-btn" id="copy-negative" aria-label="Copy negative prompt" title="Copy negative prompt"><span class="sr-only">Copy negative prompt</span>📋</button>
+              <button class="copy-btn" id="copy-negative" type="button" aria-label="Copy negative prompt" title="Copy negative prompt"><span class="sr-only">Copy negative prompt</span>📋</button>
             </div>
             <p class="prompt-preview" id="negative-preview"></p>
           </div>
@@ -88,14 +123,14 @@
         </div>
       </div>
     </div>
-    <div class="detail-footer">
-      <button id="detail-prev">⟵ Prev</button>
-      <span id="detail-counter"></span>
-      <button id="detail-next">Next ⟶</button>
-    </div>
   </div>
 </div>
-<div id="drop-overlay"><div class="drop-message"><strong>Drop image</strong><span>to find similar results</span></div></div>
+<div id="drop-overlay">
+  <div class="drop-message">
+    <strong>Drop image</strong>
+    <span>to find similar results</span>
+  </div>
+</div>
 <script src="app.js"></script>
 </body>
 </html>
