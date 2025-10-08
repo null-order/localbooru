@@ -362,6 +362,8 @@ main {
 }
 
 #status-wrapper {
+    position: sticky;
+    top: 0;
     transition: max-height 0.28s ease, opacity 0.24s ease, transform 0.24s ease;
     overflow: hidden;
     max-height: none;

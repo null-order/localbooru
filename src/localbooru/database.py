@@ -424,6 +424,8 @@ class LocalBooruDatabase:
             "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
             "FROM auto_tag_jobs",
         ).fetchone()
+        if row is None:
+            return 0, 0, 0, 0
         total = int(row["total"] or 0)
         completed = int(row["completed"] or 0)
         processing = int(row["processing"] or 0)

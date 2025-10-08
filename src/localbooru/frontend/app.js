@@ -331,7 +331,7 @@ function syncClearButton(input, button) {
     }
 }
 
-function applySidebarState() {
+function applySidebarState({ syncStatus = true } = {}) {
     if (!sidebarEl) return;
     const isDesktop = desktopMediaQuery.matches;
     if (isDesktop) {
@@ -342,7 +342,9 @@ function applySidebarState() {
         sidebarEl.classList.remove('collapsed');
         sidebarEl.classList.toggle('sidebar-open', sidebarVisible);
     }
-    setStatusCardExpanded(statusCardVisible, { animate: false });
+    if (syncStatus) {
+        setStatusCardExpanded(statusCardVisible, { animate: false });
+    }
     if (sidebarToggleBtn) {
         const expanded = isDesktop ? statusCardVisible : sidebarVisible;
         sidebarToggleBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
@@ -360,7 +362,7 @@ if (sidebarToggleBtn) {
                 setStatusCardExpanded(true, { animate: false });
             }
         }
-        applySidebarState();
+        applySidebarState({ syncStatus: false });
     });
 }
 
@@ -370,7 +372,8 @@ desktopMediaQuery.addEventListener('change', (event) => {
     } else {
         sidebarVisible = false;
     }
-    applySidebarState();
+    applySidebarState({ syncStatus: false });
+    setStatusCardExpanded(statusCardVisible, { animate: false });
 });
 
 applySidebarState();
@@ -388,65 +391,71 @@ function setStatusCardExpanded(expand, { animate = true } = {}) {
     const wrapper = statusWrapperEl;
     const content = statusCardEl;
 
-    if (statusCardVisible) {
-        wrapper.classList.remove('collapsed');
-        const target = content.scrollHeight;
-        if (!animate) {
-            wrapper.style.transition = 'none';
+    const finishTransition = (expanded) => {
+        if (expanded) {
+            wrapper.style.transition = '';
+            wrapper.style.maxHeight = 'none';
+            wrapper.style.overflow = 'visible';
+        } else {
+            wrapper.classList.add('collapsed');
+            wrapper.style.transition = '';
+            wrapper.style.overflow = 'hidden';
+        }
+    };
+
+    if (!animate) {
+        wrapper.style.transition = 'none';
+        if (statusCardVisible) {
+            wrapper.classList.remove('collapsed');
             wrapper.style.maxHeight = 'none';
             wrapper.style.opacity = '1';
             wrapper.style.overflow = 'visible';
-            requestAnimationFrame(() => {
-                wrapper.style.transition = '';
-            });
+        } else {
+            wrapper.classList.add('collapsed');
+            wrapper.style.maxHeight = '0px';
+            wrapper.style.opacity = '0';
+            wrapper.style.overflow = 'hidden';
+        }
+        // force reflow then clear transition so subsequent animations work
+        requestAnimationFrame(() => {
+            wrapper.style.transition = '';
+        });
+        return;
+    }
+
+    const handler = (event) => {
+        if (event.propertyName !== 'max-height') {
             return;
         }
+        wrapper.removeEventListener('transitionend', handler);
+        finishTransition(statusCardVisible);
+    };
+
+    wrapper.removeEventListener('transitionend', handler);
+    wrapper.addEventListener('transitionend', handler);
+
+    if (statusCardVisible) {
+        const target = content.scrollHeight;
+        wrapper.classList.remove('collapsed');
         wrapper.style.overflow = 'hidden';
         wrapper.style.transition = 'none';
         wrapper.style.maxHeight = '0px';
         wrapper.style.opacity = '0';
-        requestAnimationFrame(() => {
-            wrapper.style.transition = 'max-height 0.28s ease, opacity 0.24s ease';
-            wrapper.style.maxHeight = `${target}px`;
-            wrapper.style.opacity = '1';
-        });
-        const onEnd = (event) => {
-            if (event.propertyName === 'max-height') {
-                wrapper.style.maxHeight = 'none';
-                wrapper.style.overflow = 'visible';
-                wrapper.removeEventListener('transitionend', onEnd);
-            }
-        };
-        wrapper.addEventListener('transitionend', onEnd);
+        // force reflow
+        wrapper.getBoundingClientRect();
+        wrapper.style.transition = 'max-height 0.28s ease, opacity 0.24s ease';
+        wrapper.style.maxHeight = `${target}px`;
+        wrapper.style.opacity = '1';
     } else {
-        if (!animate) {
-            wrapper.style.transition = 'none';
-            wrapper.style.maxHeight = '0px';
-            wrapper.style.opacity = '0';
-            wrapper.classList.add('collapsed');
-            requestAnimationFrame(() => {
-                wrapper.style.transition = '';
-            });
-            return;
-        }
-        const current = content.scrollHeight;
+        const current = wrapper.offsetHeight || content.scrollHeight;
         wrapper.style.overflow = 'hidden';
         wrapper.style.transition = 'none';
         wrapper.style.maxHeight = `${current}px`;
         wrapper.style.opacity = '1';
-        requestAnimationFrame(() => {
-            wrapper.style.transition = 'max-height 0.24s ease, opacity 0.24s ease';
-            wrapper.style.maxHeight = '0px';
-            wrapper.style.opacity = '0';
-        });
-        const onEnd = (event) => {
-            if (event.propertyName === 'max-height') {
-                wrapper.classList.add('collapsed');
-                wrapper.style.overflow = 'hidden';
-                wrapper.removeEventListener('transitionend', onEnd);
-            }
-        };
-        wrapper.addEventListener('transitionend', onEnd);
+        wrapper.getBoundingClientRect();
+        wrapper.style.transition = 'max-height 0.24s ease, opacity 0.24s ease';
+        wrapper.style.maxHeight = '0px';
+        wrapper.style.opacity = '0';
     }
 }
 

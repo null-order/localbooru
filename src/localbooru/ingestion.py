@@ -75,8 +75,22 @@ def ingest_path(
         # Fallback for extra roots - compute relative with respect to path drive
         rel_path = path.as_posix()
     stat = path.stat()
-    chunks = read_png_metadata(path)
-    tags, description_text, comment_meta = collect_tags(chunks)
+    existing = db.lookup_image(rel_path)
+    unchanged = False
+    if existing is not None:
+        if abs(existing["mtime"] - stat.st_mtime) < 1e-6 and existing["size"] == stat.st_size:
+            unchanged = True
+
+    if unchanged:
+        image_id = existing["id"]
+        changed = False
+        tags = []
+        description_text = existing["description"] if "description" in existing.keys() else None
+        comment_meta = {}
+        chunks = {}
+    else:
+        chunks = read_png_metadata(path)
+        tags, description_text, comment_meta = collect_tags(chunks)
 
     auto_enabled = config.auto_tag_missing
     auto_mode = (config.auto_tag_mode or "missing").lower()
@@ -102,28 +116,32 @@ def ingest_path(
             except Exception as exc:  # pragma: no cover - defensive around external model
                 LOGGER.exception("WD14 tagging failed for %s: %s", path, exc)
 
-    if auto_tags:
-        tags = merge_tag_records(tags, auto_tags)
-    width = _safe_int(chunks.get("Width") or comment_meta.get("width"))
-    height = _safe_int(chunks.get("Height") or comment_meta.get("height"))
-    seed = comment_meta.get("seed")
-    model = comment_meta.get("Source") or comment_meta.get("source") or chunks.get("Source")
-    source = chunks.get("Source") or comment_meta.get("Source") or comment_meta.get("source")
-    metadata_blob = json.dumps(comment_meta) if comment_meta else None
-    image_id, changed = db.upsert_image_record(
-        rel_path=rel_path,
-        name=path.name,
-        mtime=stat.st_mtime,
-        size=stat.st_size,
-        width=width,
-        height=height,
-        seed=str(seed) if seed is not None else None,
-        model=model,
-        source=source,
-        description=description_text,
-        metadata_json=metadata_blob,
-        tags=tags,
-    )
+    if not unchanged:
+        if auto_tags:
+            tags = merge_tag_records(tags, auto_tags)
+        width = _safe_int(chunks.get("Width") or comment_meta.get("width"))
+        height = _safe_int(chunks.get("Height") or comment_meta.get("height"))
+        seed = comment_meta.get("seed")
+        model = comment_meta.get("Source") or comment_meta.get("source") or chunks.get("Source")
+        source = chunks.get("Source") or comment_meta.get("Source") or comment_meta.get("source")
+        metadata_blob = json.dumps(comment_meta) if comment_meta else None
+        image_id, changed = db.upsert_image_record(
+            rel_path=rel_path,
+            name=path.name,
+            mtime=stat.st_mtime,
+            size=stat.st_size,
+            width=width,
+            height=height,
+            seed=str(seed) if seed is not None else None,
+            model=model,
+            source=source,
+            description=description_text,
+            metadata_json=metadata_blob,
+            tags=tags,
+        )
+    else:
+        image_id = existing["id"]
+        changed = False
     if auto_enabled:
         inserted_auto_tags = any(tag.source == "auto" for tag in tags)
         if context is not None:
