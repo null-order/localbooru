@@ -690,9 +690,9 @@ main {
 .detail-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
     gap: 16px;
-    padding: 32px 32px 0 28px;
+    padding: 24px 32px 0 28px;
     padding-right: 88px;
 }
 
@@ -813,7 +813,7 @@ main {
     color: #c7ffe3;
     border: 1px solid rgba(96, 212, 148, 0.3);
     border-radius: 8px;
-    padding: 8px 12px;
+    padding: 4px 8px;
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
