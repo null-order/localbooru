@@ -2302,9 +2302,6 @@ async function openDetail(id, options = {}) {
       { label: "File Size", value: formatFileSize(item.size) },
     );
     const statusChipsHtml = buildStatusChips(data.processing || null);
-    const similarBtnHtml = clipEnabled
-      ? '<button id="detail-similar" class="detail-similar" type="button" aria-label="Find similar via CLIP">Find Similar ≈</button>'
-      : "";
     detailInfo.innerHTML = `
             <div class="info-card">
                 <div class="info-fields">
@@ -2316,24 +2313,8 @@ async function openDetail(id, options = {}) {
                       .join("")}
                 </div>
                 ${statusChipsHtml ? `<div class="status-chips">${statusChipsHtml}</div>` : ""}
-                ${similarBtnHtml}
-            </div>
-        `;
-    const similarBtn = document.getElementById("detail-similar");
-    if (similarBtn) {
-      similarBtn.addEventListener("click", () => {
-        const imageId = Number(currentDetailId);
-        if (!Number.isFinite(imageId)) return;
-        if (!clipEnabled) return;
-        const tagFilter = searchBox.value.trim();
-        closeDetail({ skipHistory: true });
-        runClipSearch({
-          positiveImages: [imageId],
-          tagQuery: tagFilter,
-          updateInput: `image:${imageId}`,
-        });
-      });
-    }
+              </div>
+            `;
     const tagList = Array.isArray(data.tags) ? data.tags : [];
     renderDetailTags(tagList);
     renderCharacterDetails(data.characters || []);
