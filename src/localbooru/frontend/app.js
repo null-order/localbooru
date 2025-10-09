@@ -27,8 +27,6 @@ const detailImage = document.getElementById('detail-image');
 const detailInfo = document.getElementById('detail-info');
 const detailTags = document.getElementById('detail-tags');
 const detailNegTags = document.getElementById('detail-neg-tags');
-const detailDescription = document.getElementById('detail-description');
-const detailDescSection = document.getElementById('detail-desc-section');
 const detailNegSection = document.getElementById('detail-neg-section');
 const detailCharSection = document.getElementById('detail-char-section');
 const detailCharacters = document.getElementById('detail-characters');
@@ -48,6 +46,12 @@ const positivePreview = document.getElementById('positive-preview');
 const negativePreview = document.getElementById('negative-preview');
 const positiveBlock = document.getElementById('prompt-positive-block');
 const negativeBlock = document.getElementById('prompt-negative-block');
+const copyAllNaiBtn = document.getElementById('copy-all-nai');
+const copyAllDanbooruBtn = document.getElementById('copy-all-danbooru');
+const copyEmbeddedNaiBtn = document.getElementById('copy-embedded-nai');
+const copyEmbeddedDanbooruBtn = document.getElementById('copy-embedded-danbooru');
+const copyAutoNaiBtn = document.getElementById('copy-auto-nai');
+const copyAutoDanbooruBtn = document.getElementById('copy-auto-danbooru');
 if (autoProgressBar) {
     autoProgressBar.style.width = '0%';
     autoProgressBar.dataset.label = '0%';
@@ -473,7 +477,8 @@ function applyTagsToCard(imageId, tags) {
             const label = typeof tag.tag === 'string' && tag.tag ? tag.tag : norm;
             const emphasis = typeof tag.emphasis === 'string' ? tag.emphasis : 'normal';
             const weight = Number.isFinite(tag.weight) ? Number(tag.weight) : 1;
-            normalized.push({ tag: label, norm, kind, emphasis, weight });
+            const source = typeof tag.source === 'string' && tag.source ? tag.source : 'embedded';
+            normalized.push({ tag: label, norm, kind, emphasis, weight, source });
         });
     }
 
@@ -812,6 +817,202 @@ function formatFileSize(bytes) {
     return `${bytes.toFixed(bytes >= 10 ? 0 : 1)} ${units[u]}`;
 }
 
+const STATUS_LABELS = {
+    ready: 'Done',
+    done: 'Done',
+    pending: 'Queued',
+    processing: 'Processing',
+    error: 'Failed',
+    failed: 'Failed',
+    skipped: 'Done',
+    disabled: 'Disabled',
+    missing: 'Not queued',
+    unknown: 'Unknown',
+};
+
+const STATUS_CLASS_MAP = {
+    ready: 'done',
+    done: 'done',
+    pending: 'queued',
+    processing: 'processing',
+    error: 'failed',
+    failed: 'failed',
+    skipped: 'done',
+    disabled: 'disabled',
+    missing: 'missing',
+    unknown: 'unknown',
+};
+
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value).replace(/[&<>"']/g, (ch) => {
+        switch (ch) {
+            case '&':
+                return '&amp;';
+            case '<':
+                return '&lt;';
+            case '>':
+                return '&gt;';
+            case '"':
+                return '&quot;';
+            case '\'':
+                return '&#39;';
+            default:
+                return ch;
+        }
+    });
+}
+
+function normaliseStatus(state) {
+    if (!state || state.enabled === false) {
+        return 'disabled';
+    }
+    const raw = typeof state.status === 'string' ? state.status.trim().toLowerCase() : '';
+    if (raw) return raw;
+    if (state.has_embedding) return 'ready';
+    if (state.has_tags) return 'ready';
+    return 'unknown';
+}
+
+function buildStatusChip(title, state) {
+    if (!state) return '';
+    const status = normaliseStatus(state);
+    let label = STATUS_LABELS[status] || 'Unknown';
+    if ((status === 'pending' || status === 'queued') && typeof state.position === 'number' && state.position > 0) {
+        label = `${label} (#${state.position})`;
+    }
+    const statusClass = STATUS_CLASS_MAP[status] || 'unknown';
+    return `<span class="status-chip status-${statusClass}">${escapeHtml(title)} • ${escapeHtml(label)}</span>`;
+}
+
+function buildStatusChips(processing) {
+    const clipState = processing && typeof processing === 'object' && processing.clip
+        ? { ...processing.clip }
+        : { enabled: false, status: 'disabled' };
+    const autoState = processing && typeof processing === 'object' && processing.auto
+        ? { ...processing.auto }
+        : { enabled: false, status: 'disabled' };
+
+    if (clipState && clipState.has_embedding) {
+        clipState.status = clipState.status || 'ready';
+    }
+    if (autoState && autoState.has_tags) {
+        autoState.status = autoState.status || 'ready';
+        autoState.has_tags = true;
+    }
+
+    const chips = [
+        buildStatusChip('CLIP', clipState),
+        buildStatusChip('Auto Tags', autoState),
+    ].filter(Boolean);
+    return chips.join('');
+}
+
+function uniqueStrings(items) {
+    const seen = new Set();
+    return items
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter((item) => {
+            if (!item) return false;
+            const key = item.toLowerCase();
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+}
+
+function buildTagStrings(tagList, style) {
+    const results = [];
+    tagList.forEach((tag) => {
+        if (!tag || typeof tag !== 'object') return;
+        if (tag.kind === 'negative') return;
+        const label = typeof tag.tag === 'string' ? tag.tag : '';
+        if (!label) return;
+        if (style === 'danbooru') {
+            results.push(label.replace(/\s+/g, '_').trim());
+        } else {
+            const raw = typeof tag.raw === 'string' && tag.raw.trim() ? tag.raw : label;
+            results.push(raw.replace(/_/g, ' ').trim());
+        }
+    });
+    return uniqueStrings(results);
+}
+
+function buildAllNaiString(positivePrompt, embeddedStrings, autoStrings) {
+    const basePrompt = typeof positivePrompt === 'string' ? positivePrompt.trim() : '';
+    const embedList = uniqueStrings(embeddedStrings);
+    const autoList = uniqueStrings(autoStrings);
+    if (!basePrompt && !embedList.length && !autoList.length) {
+        return '';
+    }
+    if (!basePrompt) {
+        return uniqueStrings([...embedList, ...autoList]).join(', ');
+    }
+    const extraAuto = autoList.filter((token) => !basePrompt.toLowerCase().includes(token.toLowerCase()));
+    if (!extraAuto.length) {
+        return basePrompt;
+    }
+    return `${basePrompt}${basePrompt.trim().endsWith(',') ? ' ' : ', '}${extraAuto.join(', ')}`;
+}
+
+function buildDanbooruString(embeddedStrings, autoStrings) {
+    return uniqueStrings([...embeddedStrings, ...autoStrings]).join(' ');
+}
+
+function setCopyButton(button, value, description) {
+    if (!button) return;
+    const trimmed = typeof value === 'string' ? value.trim() : '';
+    if (!trimmed) {
+        button.disabled = true;
+        button.onclick = null;
+        if (description) {
+            button.title = `${description} (unavailable)`;
+        }
+        return;
+    }
+    button.disabled = false;
+    if (description) {
+        button.title = description;
+    }
+    button.onclick = () => copyText(trimmed);
+}
+
+function updateCopyButtons({ positivePrompt, tags }) {
+    const buttons = [
+        copyAllNaiBtn,
+        copyAllDanbooruBtn,
+        copyEmbeddedNaiBtn,
+        copyEmbeddedDanbooruBtn,
+        copyAutoNaiBtn,
+        copyAutoDanbooruBtn,
+    ];
+    if (!buttons.some(Boolean)) {
+        return;
+    }
+    const tagList = Array.isArray(tags) ? tags : [];
+    const nonNegative = tagList.filter((tag) => tag && tag.kind !== 'negative');
+    const embeddedTags = nonNegative.filter((tag) => (tag.source || 'embedded') !== 'auto');
+    const autoTags = nonNegative.filter((tag) => (tag.source || 'embedded') === 'auto');
+
+    const naiEmbedded = buildTagStrings(embeddedTags, 'nai');
+    const naiAuto = buildTagStrings(autoTags, 'nai');
+    const danEmbedded = buildTagStrings(embeddedTags, 'danbooru');
+    const danAuto = buildTagStrings(autoTags, 'danbooru');
+
+    const allNai = buildAllNaiString(positivePrompt, naiEmbedded, naiAuto);
+    const allDan = buildDanbooruString(danEmbedded, danAuto);
+    const embeddedNai = naiEmbedded.join(', ');
+    const embeddedDan = danEmbedded.join(' ');
+    const autoNai = naiAuto.join(', ');
+    const autoDan = danAuto.join(' ');
+
+    setCopyButton(copyAllNaiBtn, allNai, 'Copy all tags (NovelAI)');
+    setCopyButton(copyAllDanbooruBtn, allDan, 'Copy all tags (Danbooru)');
+    setCopyButton(copyEmbeddedNaiBtn, embeddedNai, 'Copy embedded tags (NovelAI)');
+    setCopyButton(copyEmbeddedDanbooruBtn, embeddedDan, 'Copy embedded tags (Danbooru)');
+    setCopyButton(copyAutoNaiBtn, autoNai, 'Copy auto tags (NovelAI)');
+    setCopyButton(copyAutoDanbooruBtn, autoDan, 'Copy auto tags (Danbooru)');
+}
 
 function renderCard(item) {
     const width = Number.isFinite(item.width) ? item.width : '–';
@@ -1908,24 +2109,33 @@ async function openDetail(id, options = {}) {
         detailImage.parentElement.style.removeProperty('--image-aspect');
         detailImage.parentElement.style.removeProperty('aspect-ratio');
         detailImage.style.removeProperty('aspect-ratio');
+        const infoFields = [
+            { label: 'Model', value: displayModel },
+            { label: 'Seed', value: displaySeed },
+            {
+                label: 'Dimensions',
+                value: `${Number.isFinite(item.width) ? item.width : '–'}×${Number.isFinite(item.height) ? item.height : '–'}`,
+            },
+            { label: 'File Size', value: formatFileSize(item.size) },
+        ];
+        const statusChipsHtml = buildStatusChips(data.processing || null);
         detailInfo.innerHTML = `
-            <h3>Info</h3>
-            <div class="info-grid">
-                <div class="info-chip"><span>Model</span><strong>${displayModel}</strong></div>
-                <div class="info-chip"><span>Seed</span><strong>${displaySeed}</strong></div>
-                <div class="info-chip"><span>Dimensions</span><strong>${item.width ?? '–'}×${item.height ?? '–'}</strong></div>
-                <div class="info-chip"><span>File Size</span><strong>${formatFileSize(item.size)}</strong></div>
+            <div class="info-card">
+                <div class="info-fields">
+                    ${infoFields
+                        .map(
+                            (field) =>
+                                `<div class="info-chip"><span>${escapeHtml(field.label)}</span><strong>${escapeHtml(field.value)}</strong></div>`
+                        )
+                        .join('')}
+                </div>
+                ${statusChipsHtml ? `<div class="status-chips">${statusChipsHtml}</div>` : ''}
             </div>
         `;
-        renderDetailTags(data.tags);
+        const tagList = Array.isArray(data.tags) ? data.tags : [];
+        renderDetailTags(tagList);
         renderCharacterDetails(data.characters || []);
-        if (item.description) {
-            detailDescription.textContent = item.description;
-            detailDescSection.style.display = '';
-        } else {
-            detailDescription.textContent = '';
-            detailDescSection.style.display = 'none';
-        }
+        updateCopyButtons({ positivePrompt: currentPrompts.positive, tags: tagList });
         currentDetailId = detailId;
         if (detailSimilarBtn) {
             detailSimilarBtn.disabled = !clipEnabled;
@@ -1955,6 +2165,8 @@ function renderDetailTags(tags) {
         span.className = 'tag-pill';
         span.dataset.kind = tag.kind;
         span.dataset.emphasis = tag.emphasis;
+        const source = typeof tag.source === 'string' && tag.source ? tag.source : 'embedded';
+        span.dataset.source = source;
         if (Number.isFinite(tag.weight)) {
             span.dataset.weight = Number(tag.weight).toFixed(1);
         } else {
@@ -1962,6 +2174,11 @@ function renderDetailTags(tags) {
         }
         const label = tag.count ? `${tag.tag} (${tag.count})` : tag.tag;
         span.textContent = label;
+        if (source === 'auto') {
+            span.title = 'Auto-generated tag';
+        } else {
+            span.title = 'Embedded tag';
+        }
         span.addEventListener('click', () => {
             let token;
             if (tag.kind === 'negative') {
@@ -2031,10 +2248,17 @@ function renderCharacterDetails(characters) {
             span.className = 'tag-pill';
             span.dataset.kind = tag.kind || 'character';
             span.dataset.emphasis = tag.emphasis || 'normal';
+            const source = typeof tag.source === 'string' && tag.source ? tag.source : 'embedded';
+            span.dataset.source = source;
             const weight = typeof tag.weight === 'number' ? tag.weight : 1;
             span.dataset.weight = weight.toFixed(1);
             const label = tag.count ? `${tag.tag} (${tag.count})` : tag.tag;
             span.textContent = label;
+            if (source === 'auto') {
+                span.title = 'Auto-generated tag';
+            } else {
+                span.title = 'Embedded tag';
+            }
             span.addEventListener('click', () => {
                 const token = tag.kind === 'negative' ? `uc:${tag.tag}` : `char:${tag.tag}`;
                 applyToken(token);
@@ -2148,6 +2372,7 @@ function closeDetail({ skipHistory = false } = {}) {
         imageContainer.style.removeProperty('aspect-ratio');
     }
     detailImage.style.removeProperty('aspect-ratio');
+    updateCopyButtons({ positivePrompt: '', tags: [] });
     if (!skipHistory) {
         const anchorIndexForHistory = scrollRestorePending && pendingScrollIndex !== null ? pendingScrollIndex : getAnchorIndex();
         const clipTokenForHistory = getActiveClipToken();

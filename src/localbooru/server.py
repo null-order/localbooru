@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import os
 import shutil
+import sqlite3
 import threading
 import urllib.parse
 from http import HTTPStatus
@@ -410,37 +411,84 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
 
         db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
         conn = db.new_connection()
+        clip_row = None
+        auto_row = None
+        auto_position: Optional[int] = None
         try:
-            row = conn.execute("SELECT * FROM images WHERE id=?", (image_id,)).fetchone()
-            if not row:
+            raw_row = conn.execute("SELECT * FROM images WHERE id=?", (image_id,)).fetchone()
+            if not raw_row:
                 self.send_error(HTTPStatus.NOT_FOUND, "Image not found")
                 return
+            row_map: Dict[str, object] = {}
+            if hasattr(raw_row, "keys"):
+                for key in raw_row.keys():  # type: ignore[attr-defined]
+                    try:
+                        row_map[key] = raw_row[key]
+                    except (IndexError, KeyError):
+                        continue
+            else:
+                try:
+                    # sqlite rows are sequences; fall back to positional mapping
+                    row_map = dict(enumerate(raw_row))  # type: ignore[arg-type]
+                except TypeError:
+                    row_map = {}
+
+            def row_get(key: str, default=None):
+                return row_map.get(key, default)
+
             tag_rows = conn.execute(
-                "SELECT tag, norm, kind, emphasis, weight, raw FROM tags WHERE image_id=? ORDER BY kind, tag",
+                "SELECT tag, norm, kind, emphasis, weight, raw, source FROM tags WHERE image_id=? ORDER BY kind, tag",
                 (image_id,),
             ).fetchall()
-            pairs = [(r[1], r[2]) for r in tag_rows]
-            seen_pairs = []
-            seen_set = set()
-            for pair in pairs:
-                if pair not in seen_set:
-                    seen_set.add(pair)
-                    seen_pairs.append(pair)
+            seen_pairs: List[tuple[str, str]] = []
+            seen_set: Set[tuple[str, str]] = set()
+            for row in tag_rows:
+                pair = (row["norm"], row["kind"])
+                if pair in seen_set:
+                    continue
+                seen_set.add(pair)
+                seen_pairs.append(pair)
             counts: Dict[tuple[str, str], int] = {}
             if seen_pairs:
-                selects = " UNION ALL ".join(["SELECT ? AS norm, ? AS kind"] * len(seen_pairs))
-                params = [value for pair in seen_pairs for value in pair]
-                sql_counts = (
-                    "SELECT t.norm, t.kind, COUNT(DISTINCT t.image_id) FROM tags t "
-                    f"JOIN ({selects}) wanted ON t.norm = wanted.norm AND t.kind = wanted.kind "
-                    "GROUP BY t.norm, t.kind"
-                )
-                for norm, kind, freq in conn.execute(sql_counts, params):
-                    counts[(norm, kind)] = freq
+                pairs_by_kind: Dict[str, List[str]] = {}
+                for norm, kind in seen_pairs:
+                    bucket = pairs_by_kind.setdefault(kind, [])
+                    bucket.append(norm)
+                for kind, norm_list in pairs_by_kind.items():
+                    unique_norms = list(dict.fromkeys(norm_list))
+                    placeholders = ",".join("?" for _ in unique_norms)
+                    sql_counts = (
+                        f"SELECT norm, kind, COUNT(DISTINCT image_id) AS freq FROM tags "
+                        f"WHERE kind = ? AND norm IN ({placeholders}) "
+                        "GROUP BY norm, kind"
+                    )
+                    params = [kind, *unique_norms]
+                    for norm, row_kind, freq in conn.execute(sql_counts, params):
+                        counts[(norm, row_kind)] = freq
+
+            clip_row = conn.execute(
+                "SELECT status, model, queued_at, updated_at, error FROM clip_embeddings WHERE image_id=?",
+                (image_id,),
+            ).fetchone()
+            auto_row = conn.execute(
+                "SELECT status, queued_at, updated_at, model, error FROM auto_tag_jobs WHERE image_id=?",
+                (image_id,),
+            ).fetchone()
+            if auto_row is not None:
+                status_value = auto_row["status"]
+                queued_value = auto_row["queued_at"]
+                if status_value == "pending" and queued_value is not None:
+                    pos_row = conn.execute(
+                        "SELECT COUNT(*) FROM auto_tag_jobs WHERE status='pending' AND queued_at <= ?",
+                        (queued_value,),
+                    ).fetchone()
+                    if pos_row is not None:
+                        auto_position = int(pos_row[0])
         finally:
             conn.close()
 
-        metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        metadata_json = row_get("metadata_json")
+        metadata = json.loads(metadata_json) if metadata_json else {}
         characters = extract_character_details(metadata)
         positive_prompt = metadata.get("prompt") if isinstance(metadata, dict) else None
         if not positive_prompt and isinstance(metadata, dict):
@@ -457,21 +505,24 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 .get("base_caption")
             )
 
+        image_path = row_get("path") or ""
+        image_identifier = row_get("id", image_id) or image_id
+
         data = {
             "image": {
-                "id": row["id"],
-                "name": row["name"],
-                "path": row["path"],
-                "file_url": self.file_url_for(row["id"], row["path"]),
-                "thumb_url": self.thumb_url_for(row["id"], row["path"]),
-                "width": row["width"],
-                "height": row["height"],
-                "seed": row["seed"],
-                "model": row["model"] or row["source"],
-                "description": row["description"],
+                "id": image_identifier,
+                "name": row_get("name"),
+                "path": image_path,
+                "file_url": self.file_url_for(image_identifier, image_path),
+                "thumb_url": self.thumb_url_for(image_identifier, image_path),
+                "width": row_get("width"),
+                "height": row_get("height"),
+                "seed": row_get("seed"),
+                "model": row_get("model") or row_get("source"),
+                "description": row_get("description"),
                 "metadata": metadata,
-                "mtime": row["mtime"],
-                "size": row["size"],
+                "mtime": row_get("mtime"),
+                "size": row_get("size"),
             },
             "tags": [
                 {
@@ -481,9 +532,10 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                     "emphasis": emphasis,
                     "weight": weight,
                     "raw": raw,
+                    "source": source or "embedded",
                     "count": counts.get((norm, kind), 1),
                 }
-                for tag, norm, kind, emphasis, weight, raw in tag_rows
+                for tag, norm, kind, emphasis, weight, raw, source in tag_rows
             ],
             "characters": characters,
             "prompts": {
@@ -496,6 +548,81 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 tag_norm = tag.get("norm")
                 kind = tag.get("kind", "character")
                 tag["count"] = counts.get((tag_norm, kind), 1)
+
+        clip_enabled = False
+        auto_enabled = False
+        config: Optional[LocalBooruConfig] = getattr(self.server, "config", None)  # type: ignore[attr-defined]
+        if config:
+            clip_enabled = bool(getattr(config, "clip_enabled", False))
+            auto_enabled = bool(getattr(config, "auto_tag_background", False) or getattr(config, "auto_tag_missing", False))
+
+        clip_info: Dict[str, object] = {"enabled": clip_enabled}
+        if clip_row is not None:
+            clip_info.update(
+                {
+                    "status": str(clip_row["status"]) if clip_row["status"] else "unknown",
+                    "model": clip_row["model"],
+                    "queued_at": clip_row["queued_at"],
+                    "updated_at": clip_row["updated_at"],
+                    "error": clip_row["error"],
+                    "has_embedding": bool(clip_row["status"] == "ready"),
+                }
+            )
+        else:
+            clip_info.update(
+                {
+                    "status": "disabled" if not clip_enabled else "missing",
+                    "model": getattr(config, "clip_model_name", None) if config else None,
+                    "queued_at": None,
+                    "updated_at": None,
+                    "error": None,
+                    "has_embedding": False,
+                }
+            )
+
+        auto_has_tags = False
+        for row in tag_rows:
+            source_value = None
+            try:
+                source_value = row["source"]
+            except (KeyError, TypeError):
+                try:
+                    source_value = row[-1]
+                except (IndexError, TypeError):
+                    source_value = None
+            if (source_value or "embedded") == "auto":
+                auto_has_tags = True
+                break
+        auto_info: Dict[str, object] = {
+            "enabled": auto_enabled,
+            "has_tags": auto_has_tags,
+            "position": auto_position,
+        }
+        if auto_row is not None:
+            auto_info.update(
+                {
+                    "status": str(auto_row["status"]) if auto_row["status"] else "unknown",
+                    "queued_at": auto_row["queued_at"],
+                    "updated_at": auto_row["updated_at"],
+                    "model": auto_row["model"],
+                    "error": auto_row["error"],
+                }
+            )
+        else:
+            auto_info.update(
+                {
+                    "status": "disabled" if not auto_enabled else "missing",
+                    "queued_at": None,
+                    "updated_at": None,
+                    "model": getattr(config, "auto_tag_model", None) if config else None,
+                    "error": None,
+                }
+            )
+
+        data["processing"] = {
+            "clip": clip_info,
+            "auto": auto_info,
+        }
 
         self._send_json(data)
 
@@ -857,7 +984,11 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         self._stream_path(resolved, content_type=fallback_type, cache_control="public, max-age=31536000")
 
     def log_message(self, format: str, *args) -> None:  # pragma: no cover - adjust logging
-        LOGGER.info("%s - %s", self.address_string(), format % args)
+        message = format % args
+        if "/api/status/" in message:
+            LOGGER.debug("%s - %s", self.address_string(), message)
+        else:
+            LOGGER.info("%s - %s", self.address_string(), message)
 
     # --- helper serialization --------------------------------------------------------
 

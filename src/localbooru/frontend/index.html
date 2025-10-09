@@ -75,6 +75,10 @@
 <div id="detail-overlay" aria-hidden="true">
   <div id="detail-card" role="dialog" aria-modal="true" aria-labelledby="detail-title">
     <button id="detail-close" class="detail-close" type="button" aria-label="Close detail">×</button>
+    <div class="detail-header">
+      <h2 id="detail-title"></h2>
+      <button id="detail-similar" class="detail-similar" type="button" aria-label="Find similar via CLIP">≈</button>
+    </div>
     <div class="detail-body">
       <div class="detail-image">
         <img id="detail-image" alt="Selected artwork">
@@ -86,9 +90,18 @@
         </div>
       </div>
       <div class="detail-meta">
-        <button id="detail-similar" class="detail-similar" type="button" aria-label="Find similar via CLIP">≈</button>
-        <h2 id="detail-title"></h2>
         <div class="detail-section info" id="detail-info"></div>
+        <div class="detail-section" id="detail-copy">
+          <h3>Copy Tags</h3>
+          <div class="copy-grid">
+            <button class="copy-action" id="copy-all-nai" type="button" disabled>All • NAI</button>
+            <button class="copy-action" id="copy-all-danbooru" type="button" disabled>All • Danbooru</button>
+            <button class="copy-action" id="copy-embedded-nai" type="button" disabled>Embedded • NAI</button>
+            <button class="copy-action" id="copy-embedded-danbooru" type="button" disabled>Embedded • Danbooru</button>
+            <button class="copy-action" id="copy-auto-nai" type="button" disabled>Auto • NAI</button>
+            <button class="copy-action" id="copy-auto-danbooru" type="button" disabled>Auto • Danbooru</button>
+          </div>
+        </div>
         <div class="detail-section prompts" id="detail-prompts">
           <div class="prompt-block" id="prompt-positive-block">
             <div class="prompt-heading">
@@ -116,10 +129,6 @@
         <div class="detail-section" id="detail-neg-section">
           <h3>Undesired (uc)</h3>
           <div class="tag-pills" id="detail-neg-tags"></div>
-        </div>
-        <div class="detail-section" id="detail-desc-section">
-          <h3>Description</h3>
-          <div class="description" id="detail-description"></div>
         </div>
       </div>
     </div>

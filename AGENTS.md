@@ -1,5 +1,7 @@
 # Repository Guidelines
 
+- ALWAYS check `git status` before reverting or discarding files; assume the working tree may be dirty.
+
 ## Project Structure & Module Organization
 The package lives under `src/localbooru`, with `cli.py`, `server.py`, and `search.py` coordinating ingestion, HTTP endpoints, and CLIP lookup. Asset bundles reside in `frontend/`, static files in `static/`, and Jinja templates in `templates/`. Generated wheels drop in `dist/`; configuration defaults live in `config.py` and backing storage helpers in `database.py`.
 

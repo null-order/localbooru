@@ -15,6 +15,8 @@ SCHEMA_STATEMENTS = [
     "PRAGMA foreign_keys = ON;",
     "CREATE TABLE IF NOT EXISTS images (\n        id INTEGER PRIMARY KEY,\n        path TEXT UNIQUE NOT NULL,\n        name TEXT NOT NULL,\n        mtime REAL NOT NULL,\n        size INTEGER NOT NULL,\n        width INTEGER,\n        height INTEGER,\n        seed TEXT,\n        model TEXT,\n        source TEXT,\n        description TEXT,\n        metadata_json TEXT\n    );",
     "CREATE TABLE IF NOT EXISTS tags (\n        id INTEGER PRIMARY KEY,\n        image_id INTEGER NOT NULL,\n        tag TEXT NOT NULL,\n        norm TEXT NOT NULL,\n        kind TEXT NOT NULL,\n        emphasis TEXT NOT NULL,\n        weight REAL NOT NULL,\n        raw TEXT NOT NULL,\n        source TEXT NOT NULL DEFAULT 'embedded',\n        FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE\n    );",
+    "CREATE INDEX IF NOT EXISTS tags_kind_norm_idx ON tags(kind, norm);",
+    "CREATE INDEX IF NOT EXISTS tags_kind_norm_image_idx ON tags(kind, norm, image_id);",
     "CREATE VIRTUAL TABLE IF NOT EXISTS tag_index USING fts5(\n        norm,\n        tag,\n        kind UNINDEXED,\n        image_id UNINDEXED,\n        tokenize=\"unicode61 tokenchars '_.:-'\"\n    );",
     "DROP TRIGGER IF EXISTS tags_ai;",
     "DROP TRIGGER IF EXISTS tags_ad;",
