@@ -1720,7 +1720,7 @@ function applyFacet(facet) {
   } else {
     token = facet.tag;
   }
-  applyToken(token);
+  applyToken(token, { skipSuggestions: true });
   clearHighlights();
 }
 
@@ -1789,7 +1789,8 @@ function commitSearch(rawValue, { pushHistory = true } = {}) {
   fetchImages(true);
 }
 
-function applyToken(token) {
+function applyToken(token, options = {}) {
+  const { skipSuggestions = false } = options;
   const current = searchBox.value.trim();
   const tokens = current
     ? current
@@ -1803,7 +1804,9 @@ function applyToken(token) {
     suggestionItems = [];
     suggestionIndex = -1;
     commitSearch(tokens.join(", "));
-    searchBox.focus();
+    if (!skipSuggestions) {
+      searchBox.focus();
+    }
   }
 }
 
@@ -2393,7 +2396,7 @@ function renderDetailTags(tags) {
       } else {
         token = tag.tag;
       }
-      applyToken(token);
+      applyToken(token, { skipSuggestions: true });
     });
     if (tag.kind === "negative") {
       hasNeg = true;
@@ -2483,7 +2486,7 @@ function renderCharacterDetails(characters) {
       span.addEventListener("click", () => {
         const token =
           tag.kind === "negative" ? `uc:${tag.tag}` : `char:${tag.tag}`;
-        applyToken(token);
+        applyToken(token, { skipSuggestions: true });
       });
       wrap.appendChild(span);
     });
@@ -2635,6 +2638,7 @@ function handleHistoryState(state) {
   const normalizedCurrentClip = currentClipToken || null;
   const clipChanged = nextClipToken !== normalizedCurrentClip;
   const queryChanged = nextQuery !== lastQuery;
+  const wasClipModeActive = clipModeActive;
   const targetDetail = nextDetail;
 
   currentHistoryState = {
@@ -2742,7 +2746,7 @@ function handleHistoryState(state) {
     pendingDetailId = targetDetail;
   }
 
-  if (queryChanged) {
+  if (queryChanged || wasClipModeActive) {
     lastQuery = nextQuery;
     fetchImages(true);
     return;
