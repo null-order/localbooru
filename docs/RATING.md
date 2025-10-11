@@ -65,12 +65,7 @@ CSS example (add to app.css):
 JS wiring: Event listeners on checkboxes trigger `applyToken` for search refresh; sync states from active tokens on load.
 
 ## CLI Flags
-- `--rate-missing`: Enable rating (default: yes); `--no-rate`: Disable.
-- `--rate-model mobilenetv3_large_100_v0_ls0.2`: Choose model.
-- `--rate-background`: Queue in background (default: yes); `--no-rate-background`: Inline during scan.
-- `--rate-batch-size 4`: Batch size for background processing.
-
-Example: `localbooru --root /gallery --rate-missing --rate-background --rate-model caformer_s36_v0_ls0.2`
+Ratings now piggyback on the WD14 auto-tag flow, so no extra CLI flags are required beyond the existing auto-tag options (e.g., `--auto-tag-missing`, `--auto-tag-mode`).
 
 ## Accuracy and Limitations
 - **Performance**: ~10-50ms/image on CPU; batching helps. GPU not supported (imgutils CPU-only).

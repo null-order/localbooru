@@ -607,73 +607,6 @@ class LocalBooruDatabase:
                 (image_id, model, best_label, best_score, scores_json, now, now),
             )
 
-    def ensure_rating_job(
-        self, image_id: int, model: str, force_reset: bool = False
-    ) -> None:
-        now = time.time()
-        with self._connection:
-            row = self._connection.execute(
-                "SELECT status, model FROM rating_jobs WHERE image_id=?",
-                (image_id,),
-            ).fetchone()
-            if row is None:
-                self._connection.execute(
-                    "INSERT INTO rating_jobs(image_id, status, model, queued_at, updated_at) VALUES (?,?,?,?,?)",
-                    (image_id, "pending", model, now, now),
-                )
-            else:
-                status = row["status"]
-                stored_model = row["model"]
-                reset_needed = False
-                if force_reset:
-                    reset_needed = True
-                elif stored_model != model:
-                    reset_needed = True
-                elif status in {"error", "missing"}:
-                    reset_needed = True
-
-                if reset_needed:
-                    self._connection.execute(
-                        "UPDATE rating_jobs SET status='pending', model=?, rating=NULL, confidence=NULL, error=NULL, queued_at=?, updated_at=? WHERE image_id=?",
-                        (model, now, now, image_id),
-                    )
-
-    def reserve_rating_batch(self, model: str, limit: int) -> List[sqlite3.Row]:
-        conn = self.new_connection()
-        try:
-            with conn:
-                rows = conn.execute(
-                    "SELECT j.image_id, i.path FROM rating_jobs j "
-                    "JOIN images i ON i.id = j.image_id "
-                    "WHERE j.status = 'pending' AND j.model = ? "
-                    "ORDER BY j.queued_at ASC LIMIT ?",
-                    (model, limit),
-                ).fetchall()
-                if not rows:
-                    return []
-                now = time.time()
-                conn.executemany(
-                    "UPDATE rating_jobs SET status='processing', updated_at=? WHERE image_id=?",
-                    ((now, row["image_id"]) for row in rows),
-                )
-                return rows
-        finally:
-            conn.close()
-
-    def mark_rating_ready(self, image_id: int) -> None:
-        now = time.time()
-        self._connection.execute(
-            "UPDATE rating_jobs SET status='ready', error=NULL, updated_at=? WHERE image_id=?",
-            (now, image_id),
-        )
-
-    def mark_rating_error(self, image_id: int, error: str) -> None:
-        now = time.time()
-        self._connection.execute(
-            "UPDATE rating_jobs SET status='error', error=?, updated_at=? WHERE image_id=?",
-            (error, now, image_id),
-        )
-
     def store_rating(
         self,
         image_id: int,
@@ -723,32 +656,7 @@ class LocalBooruDatabase:
                 (rating, confidence, scores_json, now, image_id),
             )
 
-    def rating_progress_counts(self) -> Tuple[int, int, int, int]:
-        with self._connection:
-            row = self._connection.execute(
-                "SELECT "
-                "COUNT(*) AS total, "
-                "SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END) AS completed, "
-                "SUM(CASE WHEN status IN ('pending', 'processing') THEN 1 ELSE 0 END) AS processing, "
-                "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
-                "FROM rating_jobs",
-                (),
-            ).fetchone()
-            return (
-                row["total"] or 0,
-                row["completed"] or 0,
-                row["processing"] or 0,
-                row["errors"] or 0,
-            )
-
     # --- Query helpers -----------------------------------------------------------------
-
-    def get_rating_job_status(self, image_id: int) -> Optional[str]:
-        row = self._connection.execute(
-            "SELECT status FROM rating_jobs WHERE image_id=?",
-            (image_id,),
-        ).fetchone()
-        return row["status"] if row else None
 
     def get_auto_job_status(self, image_id: int) -> Optional[str]:
         row = self._connection.execute(
@@ -756,13 +664,6 @@ class LocalBooruDatabase:
             (image_id,),
         ).fetchone()
         return row["status"] if row else None
-
-    def has_rating(self, image_id: int) -> bool:
-        row = self._connection.execute(
-            "SELECT rating FROM images WHERE id=?",
-            (image_id,),
-        ).fetchone()
-        return bool(row and row["rating"])
 
     def has_auto_tags(self, image_id: int) -> bool:
         row = self._connection.execute(

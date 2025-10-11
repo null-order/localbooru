@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 from .auto_tagging import AutoTaggingUnavailable, generate_wd14_tags
 from .config import LocalBooruConfig
 from .database import LocalBooruDatabase
-from .rating import RatingUnavailable, generate_dbrating_rating
 from .tags import TagRecord, collect_tags, merge_tag_records, read_png_metadata
 
 if TYPE_CHECKING:
@@ -168,28 +167,6 @@ def ingest_path(
     else:
         image_id = existing["id"]
         changed = False
-    if config.rating_missing:
-        db.ensure_rating_job(image_id, config.rating_model, force_reset=changed)
-        if not config.rating_background:
-            job_status = db.get_rating_job_status(image_id)
-            has_rating = db.has_rating(image_id)
-            needs_rating = changed or not has_rating or job_status == "error"
-            if needs_rating:
-                try:
-                    rating_value, confidence = generate_dbrating_rating(
-                        path,
-                        model_name=config.rating_model,
-                    )
-                except RatingUnavailable as exc:
-                    LOGGER.warning("Rating unavailable: %s", exc)
-                    db.mark_rating_error(image_id, str(exc))
-                except Exception as exc:  # pragma: no cover - defensive
-                    LOGGER.exception("Rating failed for %s: %s", path, exc)
-                    db.mark_rating_error(image_id, str(exc))
-                else:
-                    db.store_rating(image_id, rating_value, confidence)
-                    db.mark_rating_ready(image_id)
-
     if auto_rating_scores:
         db.update_rating_from_scores(image_id, auto_rating_scores)
     if auto_enabled:

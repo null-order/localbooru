@@ -3344,63 +3344,41 @@ async function pollRatingStatus() {
     if (ratingCardEl) {
       ratingCardEl.style.display = "";
     }
-    const {
-      total,
-      completed,
-      processing,
-      queued,
-      error_count,
-      state,
-      rate_per_min,
-      eta_seconds,
-      current_path,
-      errors,
-    } = data;
-    const errorList = Array.isArray(errors) ? errors : [];
-
-    let summaryText = "";
-    if (total === 0) {
-      summaryText = "No images to rate";
-    } else if (state === "idle") {
-      if (completed === total) {
-        summaryText = `Complete (${completed}/${total})`;
-      } else {
-        summaryText = `Idle (${completed}/${total})`;
-      }
-    } else if (state === "running") {
-      const progress = Math.max(0, (completed / total) * 100);
-      const etaText = eta_seconds
-        ? `ETA ${Math.round(eta_seconds / 60)}min`
-        : "";
-      summaryText = `Processing ${processing} | ${completed}/${total} ${etaText ? "| " + etaText : ""} | ${rate_per_min.toFixed(1)}/min`;
-      if (current_path) {
-        summaryText += ` | ${truncateLabel(current_path, 40)}`;
-      }
+    const { total, tagged, untagged, state, counts } = data;
+    const progressPercent = total > 0 ? Math.round((tagged / total) * 100) : 0;
+    const summaryParts = [];
+    if (total > 0) {
+      summaryParts.push(`${tagged}/${total} tagged (${progressPercent}%)`);
     }
+    if (untagged > 0) {
+      summaryParts.push(`${untagged} untagged`);
+    }
+    if (counts && typeof counts === "object") {
+      const countSummary = RATING_CLASSES.map((key) => {
+        const name = RATING_DISPLAY_NAMES[key] || key;
+        const value = Number.isFinite(counts[key]) ? Number(counts[key]) : 0;
+        return `${name}: ${value}`;
+      }).join(" | ");
+      summaryParts.push(countSummary);
+    }
+    ratingSummary.textContent = summaryParts.join(" • ") || "No rating data yet";
 
-    ratingSummary.textContent = summaryText || "Rating status unavailable";
-
-    const progress = total > 0 ? Math.max(0, (completed / total) * 100) : 0;
     if (ratingProgressBar) {
-      ratingProgressBar.style.width = `${progress}%`;
-      ratingProgressBar.dataset.label = `${Math.round(progress)}%`;
+      ratingProgressBar.style.width = `${progressPercent}%`;
+      ratingProgressBar.dataset.label = `${progressPercent}%`;
     }
 
-    if (error_count > 0) {
-      ratingErrorsList.style.display = "block";
-      ratingErrorsList.innerHTML = errorList
-        .map((e) => `<li>${escapeHtml(e)}</li>`)
-        .join("");
-    } else {
-      ratingErrorsList.style.display = "none";
-      ratingErrorsList.innerHTML = "";
-    }
+    ratingErrorsList.style.display = "none";
+    ratingErrorsList.innerHTML = "";
 
-    // Update section visibility or styling if needed
     if (state === "complete") {
       ratingStatusSection.classList.add("complete");
     } else {
       ratingStatusSection.classList.remove("complete");
+    }
+
+    if (counts && typeof counts === "object") {
+      updateRatingFilterCounts(counts);
     }
     requestAnimationFrame(updateStatusCardHeight);
   } catch (error) {

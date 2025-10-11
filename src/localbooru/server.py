@@ -314,12 +314,20 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_rating_status(self) -> None:
         LOGGER.debug("GET /api/rating_status")
-        rating_progress = getattr(self.server, "rating_progress", None)
-        if rating_progress is None:
-            self._send_json({"enabled": False})
-        else:
-            db: Optional[LocalBooruDatabase] = getattr(self.server, "db", None)
-            self._send_json(rating_progress.snapshot(db))
+        db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
+        total = db.connection.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+        counts = db.rating_counts()
+        tagged = sum(counts.values())
+        untagged = max(total - tagged, 0)
+        payload = {
+            "enabled": True,
+            "total": total,
+            "tagged": tagged,
+            "untagged": untagged,
+            "counts": {label: int(counts.get(label, 0)) for label in RATING_CLASSES},
+            "state": "complete" if untagged == 0 else "running",
+        }
+        self._send_json(payload)
 
     def _handle_rating_counts(self) -> None:
         LOGGER.debug("GET /api/rating_counts")
@@ -637,7 +645,6 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
 
         clip_enabled = False
         auto_enabled = False
-        rating_enabled = False
         config: Optional[LocalBooruConfig] = getattr(self.server, "config", None)  # type: ignore[attr-defined]
         if config:
             clip_enabled = bool(getattr(config, "clip_enabled", False))
@@ -645,7 +652,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 getattr(config, "auto_tag_background", False)
                 or getattr(config, "auto_tag_missing", False)
             )
-            rating_enabled = bool(getattr(config, "rating_missing", False))
+        rating_enabled = True
 
         clip_info: Dict[str, object] = {"enabled": clip_enabled}
         if clip_row is not None:
@@ -1195,8 +1202,6 @@ class LocalBooruHTTPServer(ThreadingHTTPServer):
         clip_indexer: Optional[ClipIndexer] = None,
         auto_progress: Optional[AutoTagProgress] = None,
         auto_indexer: Optional[AutoTagIndexer] = None,
-        rating_progress: Optional[RatingProgress] = None,
-        rating_indexer: Optional[RatingIndexer] = None,
     ) -> None:
         super().__init__(server_address, RequestHandlerClass)
         self.config = config
@@ -1206,8 +1211,6 @@ class LocalBooruHTTPServer(ThreadingHTTPServer):
         self.clip_indexer = clip_indexer
         self.auto_progress = auto_progress
         self.auto_indexer = auto_indexer
-        self.rating_progress = rating_progress
-        self.rating_indexer = rating_indexer
         self._thumb_lock = threading.Lock()
 
         def _resolve_base(path: Path) -> Path:
@@ -1336,8 +1339,6 @@ def create_http_server(
     clip_indexer: Optional[ClipIndexer] = None,
     auto_progress: Optional[AutoTagProgress] = None,
     auto_indexer: Optional[AutoTagIndexer] = None,
-    rating_progress: Optional[RatingProgress] = None,
-    rating_indexer: Optional[RatingIndexer] = None,
 ) -> LocalBooruHTTPServer:
     return LocalBooruHTTPServer(
         (config.host, config.port),
@@ -1348,6 +1349,4 @@ def create_http_server(
         clip_indexer=clip_indexer,
         auto_progress=auto_progress,
         auto_indexer=auto_indexer,
-        rating_progress=rating_progress,
-        rating_indexer=rating_indexer,
     )

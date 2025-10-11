@@ -213,43 +213,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of auto-tagging jobs to process per batch when background mode is enabled",
     )
     parser.add_argument(
-        "--rate-missing",
-        dest="rate_missing",
-        action="store_true",
-        default=None,
-        help="Enable image rating integration (default: enabled)",
-    )
-    parser.add_argument(
-        "--no-rate",
-        dest="rate_missing",
-        action="store_false",
-        help="Disable image rating integration",
-    )
-    parser.add_argument(
-        "--rate-model",
-        default="mobilenetv3_large_100_v0_ls0.2",
-        help="DBRating model to load when rating is enabled",
-    )
-    parser.add_argument(
-        "--rate-background",
-        dest="rate_background",
-        action="store_true",
-        default=None,
-        help="Queue rating jobs for background processing (default: enabled)",
-    )
-    parser.add_argument(
-        "--no-rate-background",
-        dest="rate_background",
-        action="store_false",
-        help="Run rating inline during ingestion",
-    )
-    parser.add_argument(
-        "--rate-batch-size",
-        type=int,
-        default=4,
-        help="Number of rating jobs to process per batch when background mode is enabled",
-    )
-    parser.add_argument(
         "--webview",
         action="store_true",
         help="Launch the embedded pywebview window instead of opening the default browser",
@@ -309,7 +272,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     from .scanner import ScanProgress, Scanner
     from .server import create_http_server
     from .clip import ClipIndexer, ClipProgress
-    from .rating import RatingIndexer, RatingProgress, preload_rating_model
+
 
     Path(config.db_path).parent.mkdir(parents=True, exist_ok=True)
     Path(config.thumb_cache).mkdir(parents=True, exist_ok=True)
@@ -318,10 +281,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     progress = ClipProgress(model_key=config.clip_model_key)
     auto_progress = AutoTagProgress()
-    rating_progress = RatingProgress()
     clip_indexer: Optional[ClipIndexer] = None
     auto_indexer: Optional[AutoTagIndexer] = None
-    rating_indexer: Optional[RatingIndexer] = None
 
     if config.clip_enabled:
         clip_indexer = ClipIndexer(
@@ -337,27 +298,24 @@ def main(argv: Optional[list[str]] = None) -> int:
             progress=auto_progress,
         )
 
-    if config.rating_missing:
-        preload_rating_model(config.rating_model)
-
-    if config.rating_missing and config.rating_background:
-        rating_indexer = RatingIndexer(
-            db=db,
-            config=config,
-            progress=rating_progress,
-        )
-
     scan_progress = ScanProgress()
     scanner = Scanner(
         config=config, db=db, clip_progress=progress, scan_progress=scan_progress
     )
 
     if args.status:
-        status = progress.snapshot(db)
+        status = {
+            "clip": progress.snapshot(db),
+        }
         if config.auto_tag_missing:
             status["auto_tag"] = auto_progress.snapshot(db)
-        if config.rating_missing:
-            status["rating"] = rating_progress.snapshot(db)
+        total_images = db.connection.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+        rating_counts = db.rating_counts()
+        status["rating"] = {
+            "counts": rating_counts,
+            "tagged": sum(rating_counts.values()),
+            "total": total_images,
+        }
         print(status)
         return 0
 
@@ -369,8 +327,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             clip_indexer.process_until_empty()
         if auto_indexer:
             auto_indexer.process_until_empty()
-        if rating_indexer:
-            rating_indexer.process_until_empty()
         return 0
 
     if args.clip_only:
@@ -401,9 +357,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     if config.auto_tag_missing:
         auto_progress.refresh_from_db(db)
 
-    if config.rating_missing:
-        rating_progress.refresh_from_db(db)
-
     httpd = create_http_server(
         config=config,
         db=db,
@@ -412,8 +365,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         clip_indexer=clip_indexer,
         auto_progress=auto_progress,
         auto_indexer=auto_indexer,
-        rating_progress=rating_progress,
-        rating_indexer=rating_indexer,
     )
     server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     server_thread.start()
@@ -424,9 +375,6 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if auto_indexer:
         auto_indexer.start()
-
-    if rating_indexer:
-        rating_indexer.start()
 
     if config.watch:
         scanner.start()
@@ -465,9 +413,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         if auto_indexer:
             auto_indexer.stop()
             auto_indexer.join()
-        if rating_indexer:
-            rating_indexer.stop()
-            rating_indexer.join()
         if config.watch:
             scanner.stop()
             scanner.join()
