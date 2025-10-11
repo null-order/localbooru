@@ -1,4 +1,5 @@
 """Command-line entry point for localbooru."""
+
 from __future__ import annotations
 
 import argparse
@@ -89,7 +90,13 @@ def _format_eta(seconds: float) -> str:
     return f"{sec}s"
 
 
-def _run_scan(scanner: "Scanner", scan_progress: "ScanProgress", *, show_progress: bool, stream=None) -> None:
+def _run_scan(
+    scanner: "Scanner",
+    scan_progress: "ScanProgress",
+    *,
+    show_progress: bool,
+    stream=None,
+) -> None:
     printer: Optional[_ScanProgressPrinter] = None
     if show_progress:
         printer = _ScanProgressPrinter(scan_progress, stream or sys.stderr)
@@ -103,21 +110,53 @@ def _run_scan(scanner: "Scanner", scan_progress: "ScanProgress", *, show_progres
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="LocalBooru – NovelAI browser with CLIP search")
-    parser.add_argument("--root", default=".", help="Root directory to scan for NovelAI PNGs")
+    parser = argparse.ArgumentParser(
+        description="LocalBooru – NovelAI browser with CLIP search"
+    )
+    parser.add_argument(
+        "--root", default=".", help="Root directory to scan for NovelAI PNGs"
+    )
     parser.add_argument("--db", default="gallery.db", help="Path to SQLite database")
     parser.add_argument("--thumb-cache", help="Path for thumbnail cache")
-    parser.add_argument("--thumb-size", type=int, default=512, help="Maximum thumbnail size in pixels")
-    parser.add_argument("--watch", action="store_true", help="Enable background rescanner")
-    parser.add_argument("--rescan-interval", type=int, default=600, help="Interval for rescans when watch mode enabled")
-    parser.add_argument("--no-thumbs", action="store_true", help="Disable thumbnail generation")
+    parser.add_argument(
+        "--thumb-size", type=int, default=512, help="Maximum thumbnail size in pixels"
+    )
+    parser.add_argument(
+        "--watch", action="store_true", help="Enable background rescanner"
+    )
+    parser.add_argument(
+        "--rescan-interval",
+        type=int,
+        default=600,
+        help="Interval for rescans when watch mode enabled",
+    )
+    parser.add_argument(
+        "--no-thumbs", action="store_true", help="Disable thumbnail generation"
+    )
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind HTTP server")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind HTTP server")
-    parser.add_argument("--clip-device", default="cpu", help="Device string for CLIP model (cpu/cuda)")
-    parser.add_argument("--clip-batch-size", type=int, default=8, help="Image batch size for CLIP embedding computation")
-    parser.add_argument("--no-clip", action="store_true", help="Disable CLIP indexing and search features")
-    parser.add_argument("--clip-model-name", default="ViT-B-32-quickgelu", help="OpenCLIP model name")
-    parser.add_argument("--clip-checkpoint", default="openai", help="OpenCLIP checkpoint name")
+    parser.add_argument(
+        "--port", type=int, default=8000, help="Port to bind HTTP server"
+    )
+    parser.add_argument(
+        "--clip-device", default="cpu", help="Device string for CLIP model (cpu/cuda)"
+    )
+    parser.add_argument(
+        "--clip-batch-size",
+        type=int,
+        default=8,
+        help="Image batch size for CLIP embedding computation",
+    )
+    parser.add_argument(
+        "--no-clip",
+        action="store_true",
+        help="Disable CLIP indexing and search features",
+    )
+    parser.add_argument(
+        "--clip-model-name", default="ViT-B-32-quickgelu", help="OpenCLIP model name"
+    )
+    parser.add_argument(
+        "--clip-checkpoint", default="openai", help="OpenCLIP checkpoint name"
+    )
     parser.add_argument(
         "--auto-tag-missing",
         dest="auto_tag_missing",
@@ -174,16 +213,65 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of auto-tagging jobs to process per batch when background mode is enabled",
     )
     parser.add_argument(
+        "--rate-missing",
+        dest="rate_missing",
+        action="store_true",
+        default=None,
+        help="Enable image rating integration (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-rate",
+        dest="rate_missing",
+        action="store_false",
+        help="Disable image rating integration",
+    )
+    parser.add_argument(
+        "--rate-model",
+        default="mobilenetv3_large_100_v0_ls0.2",
+        help="DBRating model to load when rating is enabled",
+    )
+    parser.add_argument(
+        "--rate-background",
+        dest="rate_background",
+        action="store_true",
+        default=None,
+        help="Queue rating jobs for background processing (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-rate-background",
+        dest="rate_background",
+        action="store_false",
+        help="Run rating inline during ingestion",
+    )
+    parser.add_argument(
+        "--rate-batch-size",
+        type=int,
+        default=4,
+        help="Number of rating jobs to process per batch when background mode is enabled",
+    )
+    parser.add_argument(
         "--webview",
         action="store_true",
         help="Launch the embedded pywebview window instead of opening the default browser",
     )
-    parser.add_argument("--no-ui", action="store_true", help="Run without opening a browser window")
+    parser.add_argument(
+        "--no-ui", action="store_true", help="Run without opening a browser window"
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level")
-    parser.add_argument("--extra-root", action="append", help="Additional directories to include in scans")
-    parser.add_argument("--scan-only", action="store_true", help="Run a single scan and exit")
-    parser.add_argument("--clip-only", action="store_true", help="Rebuild CLIP embeddings and exit")
-    parser.add_argument("--status", action="store_true", help="Print CLIP/scan status and exit")
+    parser.add_argument(
+        "--extra-root",
+        action="append",
+        help="Additional directories to include in scans",
+    )
+    parser.add_argument(
+        "--scan-only", action="store_true", help="Run a single scan and exit"
+    )
+    parser.add_argument(
+        "--clip-only", action="store_true", help="Rebuild CLIP embeddings and exit"
+    )
+    parser.add_argument(
+        "--status", action="store_true", help="Print CLIP/scan status and exit"
+    )
     return parser
 
 
@@ -211,7 +299,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     config.port = find_free_port(config.host, config.port)
 
-    LOGGER.info("localbooru starting", extra={"port": config.port, "root": str(config.root)})
+    LOGGER.info(
+        "localbooru starting", extra={"port": config.port, "root": str(config.root)}
+    )
 
     # Deferred imports to avoid pulling heavy dependencies for simple status calls later.
     from . import database
@@ -219,6 +309,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     from .scanner import ScanProgress, Scanner
     from .server import create_http_server
     from .clip import ClipIndexer, ClipProgress
+    from .rating import RatingIndexer, RatingProgress, preload_rating_model
 
     Path(config.db_path).parent.mkdir(parents=True, exist_ok=True)
     Path(config.thumb_cache).mkdir(parents=True, exist_ok=True)
@@ -227,8 +318,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     progress = ClipProgress(model_key=config.clip_model_key)
     auto_progress = AutoTagProgress()
+    rating_progress = RatingProgress()
     clip_indexer: Optional[ClipIndexer] = None
     auto_indexer: Optional[AutoTagIndexer] = None
+    rating_indexer: Optional[RatingIndexer] = None
 
     if config.clip_enabled:
         clip_indexer = ClipIndexer(
@@ -244,22 +337,40 @@ def main(argv: Optional[list[str]] = None) -> int:
             progress=auto_progress,
         )
 
+    if config.rating_missing:
+        preload_rating_model(config.rating_model)
+
+    if config.rating_missing and config.rating_background:
+        rating_indexer = RatingIndexer(
+            db=db,
+            config=config,
+            progress=rating_progress,
+        )
+
     scan_progress = ScanProgress()
-    scanner = Scanner(config=config, db=db, clip_progress=progress, scan_progress=scan_progress)
+    scanner = Scanner(
+        config=config, db=db, clip_progress=progress, scan_progress=scan_progress
+    )
 
     if args.status:
         status = progress.snapshot(db)
         if config.auto_tag_missing:
             status["auto_tag"] = auto_progress.snapshot(db)
+        if config.rating_missing:
+            status["rating"] = rating_progress.snapshot(db)
         print(status)
         return 0
 
     if args.scan_only:
-        _run_scan(scanner, scan_progress, show_progress=sys.stderr.isatty(), stream=sys.stderr)
+        _run_scan(
+            scanner, scan_progress, show_progress=sys.stderr.isatty(), stream=sys.stderr
+        )
         if clip_indexer:
             clip_indexer.process_until_empty()
         if auto_indexer:
             auto_indexer.process_until_empty()
+        if rating_indexer:
+            rating_indexer.process_until_empty()
         return 0
 
     if args.clip_only:
@@ -277,7 +388,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     if config.clip_enabled:
-        total, completed, processing, errors = db.clip_progress_counts(config.clip_model_key)
+        total, completed, processing, errors = db.clip_progress_counts(
+            config.clip_model_key
+        )
         effective_total = max(total - errors, 0)
         progress.total = total
         progress.completed = completed
@@ -288,6 +401,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     if config.auto_tag_missing:
         auto_progress.refresh_from_db(db)
 
+    if config.rating_missing:
+        rating_progress.refresh_from_db(db)
+
     httpd = create_http_server(
         config=config,
         db=db,
@@ -296,6 +412,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         clip_indexer=clip_indexer,
         auto_progress=auto_progress,
         auto_indexer=auto_indexer,
+        rating_progress=rating_progress,
+        rating_indexer=rating_indexer,
     )
     server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     server_thread.start()
@@ -306,6 +424,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if auto_indexer:
         auto_indexer.start()
+
+    if rating_indexer:
+        rating_indexer.start()
 
     if config.watch:
         scanner.start()
@@ -344,6 +465,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         if auto_indexer:
             auto_indexer.stop()
             auto_indexer.join()
+        if rating_indexer:
+            rating_indexer.stop()
+            rating_indexer.join()
         if config.watch:
             scanner.stop()
             scanner.join()

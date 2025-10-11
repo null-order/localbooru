@@ -1,6 +1,7 @@
 """Automatic tagging helpers backed by the WD14 family of models."""
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -162,7 +163,7 @@ class AutoTagIndexer(threading.Thread):
                 path = self.config.root / rel_path
             self.progress.current_path = str(path)
             try:
-                tags = generate_wd14_tags(
+                tags, rating_scores = generate_wd14_tags(
                     path,
                     model_name=self.config.auto_tag_model,
                     general_threshold=self.config.auto_tag_general_threshold,
@@ -183,6 +184,7 @@ class AutoTagIndexer(threading.Thread):
                 image_id,
                 tags,
                 strategy=self.config.auto_tag_mode,
+                rating_scores=rating_scores,
             )
             if status == "skipped":
                 self.db.mark_auto_tag_skipped(image_id)
@@ -287,12 +289,8 @@ def generate_wd14_tags(
     model_name: str,
     general_threshold: float,
     character_threshold: float,
-) -> List[TagRecord]:
-    """Return WD14-generated tags for ``image_path``.
-
-    Only general and character tags are surfaced; rating tags are currently ignored because the
-    surrounding application does not index them separately.
-    """
+) -> Tuple[List[TagRecord], Dict[str, float]]:
+    """Return WD14-generated tags and rating scores for ``image_path``."""
     loader = _load_wd14()
     model_name = _resolve_wd14_model_name(model_name)
     LOGGER.debug(
@@ -311,7 +309,7 @@ def generate_wd14_tags(
             model_name=model_name,
             general_threshold=general_threshold,
             character_threshold=character_threshold,
-            fmt=("general", "character"),
+            fmt=("rating", "general", "character"),
         )
     except KeyError as exc:
         available = ", ".join(sorted(_WD14_MODEL_NAMES or []))
@@ -324,18 +322,24 @@ def generate_wd14_tags(
             return {str(k): float(v) for k, v in payload.items() if isinstance(v, (int, float))}
         return {}
 
+    rating_map: Dict[str, float] = {}
     general_map: Dict[str, float] = {}
     character_map: Dict[str, float] = {}
 
+    if hasattr(wd14_tags, "rating"):
+        rating_map = _coerce_tag_map(getattr(wd14_tags, "rating"))
     if hasattr(wd14_tags, "general") and hasattr(wd14_tags, "character"):
         general_map = _coerce_tag_map(getattr(wd14_tags, "general"))
         character_map = _coerce_tag_map(getattr(wd14_tags, "character"))
     elif isinstance(wd14_tags, (tuple, list)):
         if wd14_tags:
-            general_map = _coerce_tag_map(wd14_tags[0])
+            rating_map = _coerce_tag_map(wd14_tags[0])
         if len(wd14_tags) > 1:
-            character_map = _coerce_tag_map(wd14_tags[1])
+            general_map = _coerce_tag_map(wd14_tags[1])
+        if len(wd14_tags) > 2:
+            character_map = _coerce_tag_map(wd14_tags[2])
     elif isinstance(wd14_tags, dict):
+        rating_map = _coerce_tag_map(wd14_tags.get("rating"))
         general_map = _coerce_tag_map(wd14_tags.get("general"))
         character_map = _coerce_tag_map(wd14_tags.get("character"))
     else:  # pragma: no cover - unexpected library change
@@ -344,6 +348,38 @@ def generate_wd14_tags(
         )
 
     records: List[TagRecord] = []
+
+    if rating_map:
+        normalized_scores = {
+            str(key).lower(): float(value)
+            for key, value in rating_map.items()
+            if isinstance(value, (int, float))
+        }
+        rating_map = normalized_scores
+        best_label, best_score = max(
+            normalized_scores.items(), key=lambda item: item[1], default=(None, None)
+        )
+        if best_label and isinstance(best_score, (int, float)):
+            rating_label = str(best_label).lower()
+            norm = rating_label
+            if norm:
+                records.append(
+                    TagRecord(
+                        tag=f"rating:{rating_label}",
+                        norm=norm,
+                        kind="rating",
+                        emphasis="normal",
+                        weight=float(best_score),
+                        raw=json.dumps(
+                            {
+                                "source": "wd14",
+                                "scores": normalized_scores,
+                            },
+                            sort_keys=True,
+                        ),
+                        source="auto",
+                    )
+                )
 
     general_tags = sorted(general_map.items(), key=lambda item: (-item[1], item[0]))
     for tag, score in general_tags:
@@ -379,7 +415,7 @@ def generate_wd14_tags(
             )
         )
 
-    return records
+    return records, rating_map
 
 
 __all__ = [

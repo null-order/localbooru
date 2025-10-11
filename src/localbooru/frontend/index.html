@@ -59,6 +59,16 @@
           <div class="status-meta" id="auto-summary">Auto-tag status unavailable</div>
           <ul class="status-errors" id="auto-errors"></ul>
         </div>
+        <div class="status-section" id="rating-status">
+          <div class="status-section-heading">
+            <span>Rating Indexer</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-bar" id="rating-progress-bar"></div>
+          </div>
+          <div class="status-meta" id="rating-summary">Rating status unavailable</div>
+          <ul class="status-errors" id="rating-errors"></ul>
+        </div>
       </div>
     </div>
     </div>
@@ -68,6 +78,41 @@
         <button id="toggle-uc" class="pill-toggle" type="button" aria-pressed="true">UC Hidden</button>
       </div>
       <ul id="facet-tags"></ul>
+    </div>
+    <div class="sidebar-card" id="rating-card">
+      <div class="sidebar-card-header">
+        <span class="sidebar-card-title">Rating Filter</span>
+      </div>
+      <div class="rating-filters">
+        <label class="rating-filter" data-rating="general">
+          <input type="checkbox" value="general" checked>
+          <span class="rating-option">
+            <span class="rating-name">General</span>
+            <span class="rating-count">0</span>
+          </span>
+        </label>
+        <label class="rating-filter" data-rating="sensitive">
+          <input type="checkbox" value="sensitive" checked>
+          <span class="rating-option">
+            <span class="rating-name">Sensitive</span>
+            <span class="rating-count">0</span>
+          </span>
+        </label>
+        <label class="rating-filter" data-rating="questionable">
+          <input type="checkbox" value="questionable" checked>
+          <span class="rating-option">
+            <span class="rating-name">Questionable</span>
+            <span class="rating-count">0</span>
+          </span>
+        </label>
+        <label class="rating-filter" data-rating="explicit">
+          <input type="checkbox" value="explicit">
+          <span class="rating-option">
+            <span class="rating-name">Explicit</span>
+            <span class="rating-count">0</span>
+          </span>
+        </label>
+      </div>
     </div>
   </aside>
 </main>
@@ -91,6 +136,10 @@
       </div>
       <div class="detail-meta">
         <div class="detail-section info" id="detail-info"></div>
+        <div class="detail-section rating" id="detail-rating">
+          <span class="rating-label"></span>
+          <div class="rating-bars" id="rating-bars"></div>
+        </div>
         <div class="detail-section" id="detail-copy">
           <h3>Copy Tags</h3>
           <div class="copy-grid">

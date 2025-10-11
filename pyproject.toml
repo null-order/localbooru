@@ -29,6 +29,9 @@ ui = [
 tagging = [
   "imgutils[tagging]",
 ]
+rating = [
+  "imgutils[validate]",
+]
 
 [project.scripts]
 localbooru = "localbooru.cli:main"

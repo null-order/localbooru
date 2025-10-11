@@ -1,4 +1,5 @@
 """Image ingestion helpers for LocalBooru."""
+
 from __future__ import annotations
 
 import json
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 from .auto_tagging import AutoTaggingUnavailable, generate_wd14_tags
 from .config import LocalBooruConfig
 from .database import LocalBooruDatabase
+from .rating import RatingUnavailable, generate_dbrating_rating
 from .tags import TagRecord, collect_tags, merge_tag_records, read_png_metadata
 
 if TYPE_CHECKING:
@@ -78,14 +80,19 @@ def ingest_path(
     existing = db.lookup_image(rel_path)
     unchanged = False
     if existing is not None:
-        if abs(existing["mtime"] - stat.st_mtime) < 1e-6 and existing["size"] == stat.st_size:
+        if (
+            abs(existing["mtime"] - stat.st_mtime) < 1e-6
+            and existing["size"] == stat.st_size
+        ):
             unchanged = True
 
     if unchanged:
         image_id = existing["id"]
         changed = False
         tags = []
-        description_text = existing["description"] if "description" in existing.keys() else None
+        description_text = (
+            existing["description"] if "description" in existing.keys() else None
+        )
         comment_meta = {}
         chunks = {}
     else:
@@ -97,11 +104,20 @@ def ingest_path(
     auto_tags: List[TagRecord] = []
     manual_tags_present = bool(tags)
 
+    auto_rating_scores: Optional[Dict[str, float]] = None
     if auto_enabled and not config.auto_tag_background:
-        should_generate = auto_mode == "augment" or not manual_tags_present
+        if unchanged:
+            missing_auto_rating = not db.has_rating_tag(image_id)
+        else:
+            missing_auto_rating = True
+        should_generate = (
+            auto_mode == "augment"
+            or not manual_tags_present
+            or missing_auto_rating
+        )
         if should_generate:
             try:
-                auto_tags = generate_wd14_tags(
+                auto_tags, auto_rating_scores = generate_wd14_tags(
                     path,
                     model_name=config.auto_tag_model,
                     general_threshold=config.auto_tag_general_threshold,
@@ -113,7 +129,9 @@ def ingest_path(
                     )
             except AutoTaggingUnavailable as exc:
                 LOGGER.warning("Auto-tagging unavailable: %s", exc)
-            except Exception as exc:  # pragma: no cover - defensive around external model
+            except (
+                Exception
+            ) as exc:  # pragma: no cover - defensive around external model
                 LOGGER.exception("WD14 tagging failed for %s: %s", path, exc)
 
     if not unchanged:
@@ -122,8 +140,16 @@ def ingest_path(
         width = _safe_int(chunks.get("Width") or comment_meta.get("width"))
         height = _safe_int(chunks.get("Height") or comment_meta.get("height"))
         seed = comment_meta.get("seed")
-        model = comment_meta.get("Source") or comment_meta.get("source") or chunks.get("Source")
-        source = chunks.get("Source") or comment_meta.get("Source") or comment_meta.get("source")
+        model = (
+            comment_meta.get("Source")
+            or comment_meta.get("source")
+            or chunks.get("Source")
+        )
+        source = (
+            chunks.get("Source")
+            or comment_meta.get("Source")
+            or comment_meta.get("source")
+        )
         metadata_blob = json.dumps(comment_meta) if comment_meta else None
         image_id, changed = db.upsert_image_record(
             rel_path=rel_path,
@@ -142,6 +168,30 @@ def ingest_path(
     else:
         image_id = existing["id"]
         changed = False
+    if config.rating_missing:
+        db.ensure_rating_job(image_id, config.rating_model, force_reset=changed)
+        if not config.rating_background:
+            job_status = db.get_rating_job_status(image_id)
+            has_rating = db.has_rating(image_id)
+            needs_rating = changed or not has_rating or job_status == "error"
+            if needs_rating:
+                try:
+                    rating_value, confidence = generate_dbrating_rating(
+                        path,
+                        model_name=config.rating_model,
+                    )
+                except RatingUnavailable as exc:
+                    LOGGER.warning("Rating unavailable: %s", exc)
+                    db.mark_rating_error(image_id, str(exc))
+                except Exception as exc:  # pragma: no cover - defensive
+                    LOGGER.exception("Rating failed for %s: %s", path, exc)
+                    db.mark_rating_error(image_id, str(exc))
+                else:
+                    db.store_rating(image_id, rating_value, confidence)
+                    db.mark_rating_ready(image_id)
+
+    if auto_rating_scores:
+        db.update_rating_from_scores(image_id, auto_rating_scores)
     if auto_enabled:
         inserted_auto_tags = any(tag.source == "auto" for tag in tags)
         if context is not None:
@@ -150,6 +200,7 @@ def ingest_path(
         else:
             job_status = db.get_auto_job_status(image_id)
             existing_auto_tags = db.has_auto_tags(image_id)
+        missing_auto_rating = not db.has_rating_tag(image_id)
 
         if config.auto_tag_background:
             if job_status in {"pending", "processing"} and existing_auto_tags:
@@ -167,20 +218,34 @@ def ingest_path(
                 if auto_mode == "augment":
                     if changed:
                         needs_job = True
-                    elif job_status in {None, "pending", "processing", "error"} and not existing_auto_tags:
+                    elif missing_auto_rating:
+                        needs_job = True
+                    elif (
+                        job_status in {None, "pending", "processing", "error"}
+                        and not existing_auto_tags
+                    ):
                         needs_job = True
                 else:
                     if not manual_tags_present:
                         if changed:
                             needs_job = True
-                        elif job_status in {None, "pending", "processing", "error"} and not existing_auto_tags:
+                        elif (
+                            job_status in {None, "pending", "processing", "error"}
+                            and not existing_auto_tags
+                        ):
                             needs_job = True
+                    elif missing_auto_rating:
+                        needs_job = True
 
                 if needs_job:
                     force_reset = (
                         changed
                         or job_status == "error"
-                        or (job_status in {"pending", "processing"} and not existing_auto_tags)
+                        or (
+                            job_status in {"pending", "processing"}
+                            and not existing_auto_tags
+                        )
+                        or missing_auto_rating
                     )
                     db.ensure_auto_tag_job(
                         image_id,
@@ -190,12 +255,22 @@ def ingest_path(
                     if context is not None:
                         context.set_job(image_id, "pending", config.auto_tag_model)
                     job_status = "pending"
-                elif existing_auto_tags and job_status and job_status not in {"ready", "skipped"}:
+                elif (
+                    existing_auto_tags
+                    and job_status
+                    and job_status not in {"ready", "skipped"}
+                    and not missing_auto_rating
+                ):
                     db.mark_auto_tag_ready(image_id)
                     if context is not None:
                         context.set_job(image_id, "ready")
                     job_status = "ready"
-        elif existing_auto_tags and job_status and job_status not in {"ready", "skipped"}:
+        elif (
+            existing_auto_tags
+            and job_status
+            and job_status not in {"ready", "skipped"}
+            and not missing_auto_rating
+        ):
             db.mark_auto_tag_ready(image_id)
             if context is not None:
                 context.set_job(image_id, "ready")

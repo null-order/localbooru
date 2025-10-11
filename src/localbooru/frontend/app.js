@@ -16,6 +16,31 @@ const autoStatusSection = document.getElementById("auto-status");
 const autoSummary = document.getElementById("auto-summary");
 const autoErrorsList = document.getElementById("auto-errors");
 const autoProgressBar = document.getElementById("auto-progress-bar");
+const ratingStatusSection = document.getElementById("rating-status");
+const ratingSummary = document.getElementById("rating-summary");
+const ratingProgressBar = document.getElementById("rating-progress-bar");
+const ratingErrorsList = document.getElementById("rating-errors");
+const ratingCardEl = document.getElementById("rating-card");
+const ratingFilterInputs = ratingCardEl
+  ? Array.from(
+      ratingCardEl.querySelectorAll("input[type=\"checkbox\"]"),
+    )
+  : [];
+const ratingFilterMeta = ratingFilterInputs.map((input) => {
+  const label = input.closest("label");
+  return {
+    input,
+    label,
+    value: String(input.value || "").toLowerCase(),
+    nameEl: label ? label.querySelector(".rating-name") : null,
+    countEl: label ? label.querySelector(".rating-count") : null,
+  };
+});
+const detailRatingSection = document.getElementById("detail-rating");
+const detailRatingLabel = detailRatingSection
+  ? detailRatingSection.querySelector(".rating-label")
+  : null;
+const ratingBarsContainer = document.getElementById("rating-bars");
 const toastStack = document.getElementById("toast-stack");
 const dropOverlay = document.getElementById("drop-overlay");
 const loadMoreBtn = document.getElementById("load-more");
@@ -105,6 +130,8 @@ let dragCounter = 0;
 const desktopMediaQuery = window.matchMedia("(min-width: 1101px)");
 let sidebarVisible = desktopMediaQuery.matches;
 let statusCardVisible = true;
+
+updateRatingFilterCounts();
 
 function getActiveClipToken() {
   if (!clipModeActive) {
@@ -850,6 +877,126 @@ function formatFileSize(bytes) {
   return `${bytes.toFixed(bytes >= 10 ? 0 : 1)} ${units[u]}`;
 }
 
+const RATING_CLASSES = ["general", "sensitive", "questionable", "explicit"];
+const RATING_DISPLAY_NAMES = {
+  general: "General",
+  sensitive: "Sensitive",
+  questionable: "Questionable",
+  explicit: "Explicit",
+};
+
+function getSearchTokensList() {
+  const current = searchBox.value ? searchBox.value.trim() : "";
+  if (!current) {
+    return [];
+  }
+  return current
+    .split(",")
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function stripRatingTokens(tokens) {
+  return tokens.filter((token) => !/^[-!]?rating:/i.test(token));
+}
+
+function syncRatingFiltersFromQuery() {
+  if (!ratingFilterMeta.length) {
+    return;
+  }
+  const tokens = getSearchTokensList();
+  const positives = new Set();
+  const negatives = new Set();
+  tokens.forEach((token) => {
+    const lowered = token.toLowerCase();
+    if (lowered.startsWith("-rating:") || lowered.startsWith("!rating:")) {
+      const value = lowered.slice(8);
+      if (RATING_CLASSES.includes(value)) {
+        negatives.add(value);
+      }
+    } else if (lowered.startsWith("rating:")) {
+      const value = lowered.slice(7);
+      if (RATING_CLASSES.includes(value)) {
+        positives.add(value);
+      }
+    }
+  });
+  ratingFilterMeta.forEach(({ input, value }) => {
+    if (!RATING_CLASSES.includes(value)) {
+      return;
+    }
+    let checked;
+    if (positives.size > 0) {
+      checked = positives.has(value) && !negatives.has(value);
+    } else {
+      checked = !negatives.has(value);
+    }
+    input.checked = checked;
+  });
+}
+
+function applyRatingFiltersToQuery(options = {}) {
+  const { pushHistory = true } = options;
+  if (!ratingFilterMeta.length) {
+    return;
+  }
+  const currentTokens = getSearchTokensList();
+  const baseTokens = stripRatingTokens(currentTokens);
+  const unchecked = Array.from(
+    new Set(
+      ratingFilterMeta
+        .filter((meta) => !meta.input.checked)
+        .map((meta) => meta.value)
+        .filter((value) => RATING_CLASSES.includes(value)),
+    ),
+  );
+  const nextTokens = [...baseTokens];
+  unchecked.forEach((value) => {
+    nextTokens.push(`-rating:${value}`);
+  });
+  const nextQuery = nextTokens.join(", ");
+  commitSearch(nextQuery, { pushHistory });
+}
+
+function updateRatingFilterCounts(countsOverride) {
+  if (!ratingFilterMeta.length) {
+    return;
+  }
+  const counts = new Map();
+  if (countsOverride && typeof countsOverride === "object") {
+    Object.entries(countsOverride).forEach(([key, value]) => {
+      const normKey = String(key).toLowerCase();
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        counts.set(normKey, numeric);
+      }
+    });
+  } else {
+    const facets = Array.isArray(facetCache) ? facetCache : [];
+    facets.forEach((facet) => {
+      if (!facet || facet.kind !== "rating") return;
+      const norm = typeof facet.norm === "string" ? facet.norm.toLowerCase() : "";
+      if (!norm) return;
+      const freq = Number.isFinite(facet.freq) ? Number(facet.freq) : 0;
+      counts.set(norm, freq);
+    });
+  }
+  ratingFilterMeta.forEach(({ label, countEl, value }) => {
+    const freq = counts.get(value) || 0;
+    if (countEl) {
+      countEl.textContent = freq.toLocaleString();
+    }
+    if (label) {
+      if (freq > 0) {
+        label.classList.add("rating-has-results");
+      } else {
+        label.classList.remove("rating-has-results");
+      }
+      label.setAttribute("data-count", String(freq));
+    }
+  });
+}
+
 const STATUS_LABELS = {
   ready: "Done",
   done: "Done",
@@ -905,6 +1052,7 @@ function normaliseStatus(state) {
   if (raw) return raw;
   if (state.has_embedding) return "ready";
   if (state.has_tags) return "ready";
+  if (state.has_rating) return "ready";
   return "unknown";
 }
 
@@ -919,6 +1067,14 @@ function buildStatusChip(title, state) {
   ) {
     label = `${label} (#${state.position})`;
   }
+  if (
+    status === "ready" &&
+    typeof state.rating === "string" &&
+    state.rating
+  ) {
+    const ratingText = state.rating.replace(/_/g, " ");
+    label = `${label} (${ratingText})`;
+  }
   const statusClass = STATUS_CLASS_MAP[status] || "unknown";
   return `<span class="status-chip status-${statusClass}">${escapeHtml(title)} • ${escapeHtml(label)}</span>`;
 }
@@ -932,6 +1088,10 @@ function buildStatusChips(processing) {
     processing && typeof processing === "object" && processing.auto
       ? { ...processing.auto }
       : { enabled: false, status: "disabled" };
+  const ratingState =
+    processing && typeof processing === "object" && processing.rating
+      ? { ...processing.rating }
+      : { enabled: false, status: "disabled" };
 
   if (clipState && clipState.has_embedding) {
     clipState.status = clipState.status || "ready";
@@ -940,10 +1100,14 @@ function buildStatusChips(processing) {
     autoState.status = autoState.status || "ready";
     autoState.has_tags = true;
   }
+  if (ratingState && ratingState.has_rating) {
+    ratingState.status = ratingState.status || "ready";
+  }
 
   const chips = [
     buildStatusChip("CLIP", clipState),
     buildStatusChip("Auto Tags", autoState),
+    buildStatusChip("Rating", ratingState),
   ].filter(Boolean);
   return chips.join("");
 }
@@ -965,7 +1129,7 @@ function buildTagStrings(tagList, style) {
   const results = [];
   tagList.forEach((tag) => {
     if (!tag || typeof tag !== "object") return;
-    if (tag.kind === "negative") return;
+    if (tag.kind === "negative" || tag.kind === "rating") return;
     const label = typeof tag.tag === "string" ? tag.tag : "";
     if (!label) return;
     if (style === "danbooru") {
@@ -1039,7 +1203,9 @@ function updateCopyButtons({ positivePrompt, tags }) {
     return;
   }
   const tagList = Array.isArray(tags) ? tags : [];
-  const nonNegative = tagList.filter((tag) => tag && tag.kind !== "negative");
+  const nonNegative = tagList.filter(
+    (tag) => tag && tag.kind !== "negative" && tag.kind !== "rating",
+  );
   const embeddedTags = nonNegative.filter(
     (tag) => (tag.source || "embedded") !== "auto",
   );
@@ -1709,6 +1875,7 @@ function renderFacets(facets) {
     li.addEventListener("blur", () => clearHighlights());
     facetListEl.appendChild(li);
   });
+  updateRatingFilterCounts();
 }
 
 function applyFacet(facet) {
@@ -1745,6 +1912,7 @@ function commitSearch(rawValue, { pushHistory = true } = {}) {
   requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "auto" }));
   const sameQuery = nextQuery === lastQuery;
   lastQuery = nextQuery;
+  syncRatingFiltersFromQuery();
   if (clipModeActive && lastClipPayload) {
     const payload = {
       ...lastClipPayload,
@@ -1835,6 +2003,14 @@ if (searchClearBtn) {
     suggestionIndex = -1;
     commitSearch("");
     searchBox.focus();
+  });
+}
+
+if (ratingFilterMeta.length) {
+  ratingFilterMeta.forEach(({ input }) => {
+    input.addEventListener("change", () => {
+      applyRatingFiltersToQuery();
+    });
   });
 }
 
@@ -2319,6 +2495,7 @@ async function openDetail(id, options = {}) {
               </div>
             `;
     const tagList = Array.isArray(data.tags) ? data.tags : [];
+    updateDetailRating(data.rating || null);
     renderDetailTags(tagList);
     renderCharacterDetails(data.characters || []);
     updateCopyButtons({
@@ -2363,6 +2540,116 @@ async function openDetail(id, options = {}) {
   }
 }
 
+function updateDetailRating(ratingData) {
+  if (!detailRatingSection || !detailRatingLabel) {
+    return;
+  }
+  const scoreMapRaw =
+    ratingData && typeof ratingData === "object" && ratingData.scores
+      ? ratingData.scores
+      : null;
+  const scoreMap = {};
+  if (scoreMapRaw && typeof scoreMapRaw === "object") {
+    Object.entries(scoreMapRaw).forEach(([key, value]) => {
+      const normKey = String(key).toLowerCase();
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        scoreMap[normKey] = Math.max(0, Math.min(1, numeric));
+      }
+    });
+  }
+
+  let value =
+    ratingData && typeof ratingData.value === "string"
+      ? ratingData.value
+      : "";
+  let confidence =
+    ratingData && typeof ratingData.confidence === "number"
+      ? ratingData.confidence
+      : null;
+
+  if ((!value || !value.trim()) && Object.keys(scoreMap).length) {
+    const best = RATING_CLASSES.map((key) => ({
+      key,
+      score: scoreMap[key] ?? -1,
+    })).reduce((prev, current) => (current.score > prev.score ? current : prev), {
+      key: "",
+      score: -1,
+    });
+    if (best.key) {
+      value = best.key;
+      confidence = best.score;
+    }
+  }
+
+  if (!value) {
+    detailRatingSection.style.display = "none";
+    detailRatingLabel.textContent = "";
+    detailRatingLabel.className = "rating-label";
+    detailRatingLabel.removeAttribute("title");
+    if (ratingBarsContainer) {
+      ratingBarsContainer.style.display = "none";
+      ratingBarsContainer.innerHTML = "";
+    }
+    return;
+  }
+
+  const normalized = value.toLowerCase();
+  const displayName = RATING_DISPLAY_NAMES[normalized] || value;
+  detailRatingSection.style.display = "flex";
+  detailRatingLabel.textContent = displayName;
+  detailRatingLabel.className = "rating-label";
+  detailRatingLabel.classList.add(`rating-${normalized}`);
+
+  if (typeof confidence === "number" && Number.isFinite(confidence)) {
+    const pct = Math.round(confidence * 1000) / 10;
+    detailRatingLabel.title = `Confidence ${pct.toFixed(1)}%`;
+    detailRatingLabel.textContent = `${displayName} (${pct.toFixed(1)}%)`;
+  } else {
+    detailRatingLabel.removeAttribute("title");
+  }
+
+  if (ratingBarsContainer) {
+    const rows = RATING_CLASSES.map((key) => {
+      const score = scoreMap[key] ?? 0;
+      return { key, score };
+    });
+    if (rows.some((row) => row.score > 0)) {
+      ratingBarsContainer.style.display = "flex";
+      ratingBarsContainer.innerHTML = "";
+      rows.forEach(({ key, score }) => {
+        const rowEl = document.createElement("div");
+        rowEl.className = "rating-bar";
+
+        const labelEl = document.createElement("span");
+        labelEl.className = "rating-bar-label";
+        labelEl.textContent = RATING_DISPLAY_NAMES[key] || key;
+
+        const trackEl = document.createElement("div");
+        trackEl.className = "rating-bar-track";
+
+        const fillEl = document.createElement("div");
+        fillEl.className = "rating-bar-fill";
+        const width = Math.max(0, Math.min(100, Math.round(score * 100)));
+        fillEl.style.width = `${width}%`;
+
+        const scoreEl = document.createElement("span");
+        scoreEl.className = "rating-bar-score";
+        scoreEl.textContent = `${width}%`;
+
+        trackEl.appendChild(fillEl);
+        rowEl.appendChild(labelEl);
+        rowEl.appendChild(trackEl);
+        rowEl.appendChild(scoreEl);
+        ratingBarsContainer.appendChild(rowEl);
+      });
+    } else {
+      ratingBarsContainer.style.display = "none";
+      ratingBarsContainer.innerHTML = "";
+    }
+  }
+}
+
 function renderDetailTags(tags) {
   detailTags.innerHTML = "";
   detailNegTags.innerHTML = "";
@@ -2403,6 +2690,8 @@ function renderDetailTags(tags) {
       detailNegTags.appendChild(span);
     } else if (tag.kind === "character") {
       // render via character section
+      return;
+    } else if (tag.kind === "rating") {
       return;
     } else {
       detailTags.appendChild(span);
@@ -2604,6 +2893,7 @@ function closeDetail({ skipHistory = false } = {}) {
   negativeBlock.style.display = "none";
   positivePreview.textContent = "";
   negativePreview.textContent = "";
+  updateDetailRating(null);
   const imageContainer = detailImage.parentElement;
   if (imageContainer) {
     imageContainer.style.removeProperty("--image-aspect");
@@ -2652,6 +2942,7 @@ function handleHistoryState(state) {
     searchBox.value = nextQuery;
   }
   syncClearButton(searchBox, searchClearBtn);
+  syncRatingFiltersFromQuery();
 
   pendingDetailId = targetDetail;
   pendingScrollIndex = nextPos !== null ? nextPos : 0;
@@ -2797,6 +3088,7 @@ if (searchBox.value !== lastQuery) {
 }
 syncClearButton(searchBox, searchClearBtn);
 syncClearButton(clipSearchInput, clipSearchClear);
+syncRatingFiltersFromQuery();
 pendingDetailId = normalizedInitialState.detail;
 pendingScrollIndex = normalizedInitialState.pos;
 scrollRestorePending = pendingScrollIndex > 0;
@@ -3023,6 +3315,125 @@ async function pollAutoStatus() {
   }
 }
 
+async function pollRatingStatus() {
+  if (!ratingStatusSection) {
+    return;
+  }
+
+  try {
+    const response = await fetch("/api/rating_status");
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+
+    if (data.enabled === false) {
+      ratingStatusSection.style.display = "none";
+      if (ratingCardEl) {
+        ratingCardEl.style.display = "none";
+      }
+      if (ratingProgressBar) {
+        ratingProgressBar.style.width = "0%";
+        ratingProgressBar.dataset.label = "0%";
+      }
+      requestAnimationFrame(updateStatusCardHeight);
+      return;
+    }
+
+    ratingStatusSection.style.display = "";
+    if (ratingCardEl) {
+      ratingCardEl.style.display = "";
+    }
+    const {
+      total,
+      completed,
+      processing,
+      queued,
+      error_count,
+      state,
+      rate_per_min,
+      eta_seconds,
+      current_path,
+      errors,
+    } = data;
+    const errorList = Array.isArray(errors) ? errors : [];
+
+    let summaryText = "";
+    if (total === 0) {
+      summaryText = "No images to rate";
+    } else if (state === "idle") {
+      if (completed === total) {
+        summaryText = `Complete (${completed}/${total})`;
+      } else {
+        summaryText = `Idle (${completed}/${total})`;
+      }
+    } else if (state === "running") {
+      const progress = Math.max(0, (completed / total) * 100);
+      const etaText = eta_seconds
+        ? `ETA ${Math.round(eta_seconds / 60)}min`
+        : "";
+      summaryText = `Processing ${processing} | ${completed}/${total} ${etaText ? "| " + etaText : ""} | ${rate_per_min.toFixed(1)}/min`;
+      if (current_path) {
+        summaryText += ` | ${truncateLabel(current_path, 40)}`;
+      }
+    }
+
+    ratingSummary.textContent = summaryText || "Rating status unavailable";
+
+    const progress = total > 0 ? Math.max(0, (completed / total) * 100) : 0;
+    if (ratingProgressBar) {
+      ratingProgressBar.style.width = `${progress}%`;
+      ratingProgressBar.dataset.label = `${Math.round(progress)}%`;
+    }
+
+    if (error_count > 0) {
+      ratingErrorsList.style.display = "block";
+      ratingErrorsList.innerHTML = errorList
+        .map((e) => `<li>${escapeHtml(e)}</li>`)
+        .join("");
+    } else {
+      ratingErrorsList.style.display = "none";
+      ratingErrorsList.innerHTML = "";
+    }
+
+    // Update section visibility or styling if needed
+    if (state === "complete") {
+      ratingStatusSection.classList.add("complete");
+    } else {
+      ratingStatusSection.classList.remove("complete");
+    }
+    requestAnimationFrame(updateStatusCardHeight);
+  } catch (error) {
+    console.error("Failed to fetch rating status:", error);
+    ratingSummary.textContent = "Rating status unavailable";
+    if (ratingProgressBar) {
+      ratingProgressBar.style.width = "0%";
+      ratingProgressBar.dataset.label = "0%";
+    }
+    ratingErrorsList.style.display = "none";
+    ratingErrorsList.innerHTML = "";
+    requestAnimationFrame(updateStatusCardHeight);
+  }
+}
+
+async function pollRatingCounts() {
+  if (!ratingFilterMeta.length) {
+    return;
+  }
+  try {
+    const res = await fetch("/api/rating_counts");
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (data && data.counts) {
+      updateRatingFilterCounts(data.counts);
+    }
+  } catch (err) {
+    // Suppress noisy errors; counts will refresh on next successful poll
+  }
+}
+
 async function toggleClipIndexer() {
   if (!clipToggleBtn) return;
   const state = clipToggleBtn.dataset.state;
@@ -3041,6 +3452,10 @@ if (clipToggleBtn) {
 setInterval(() => {
   pollClipStatus();
   pollAutoStatus();
+  pollRatingStatus();
+  pollRatingCounts();
 }, 2000);
 pollClipStatus();
 pollAutoStatus();
+pollRatingStatus();
+pollRatingCounts();

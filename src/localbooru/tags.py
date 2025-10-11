@@ -404,6 +404,9 @@ def parse_query_tokens(query: str) -> List[Tuple[str, str, bool]]:
         elif lowered.startswith("uc:"):
             kind = "negative"
             token = token[3:].strip()
+        elif lowered.startswith("rating:"):
+            kind = "rating"
+            token = token[7:].strip()
         while token.startswith(("-", "!")):
             exclude = True
             token = token[1:].strip()

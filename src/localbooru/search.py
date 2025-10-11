@@ -1,4 +1,5 @@
 """Tag-based search helpers for LocalBooru."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -94,16 +95,17 @@ def collect_tag_facets(
         "SELECT t.tag, t.norm, t.kind, COUNT(*) AS freq "
         "FROM matched m JOIN tags t ON t.image_id = m.image_id "
         "GROUP BY t.norm, t.kind "
-        "ORDER BY CASE t.kind WHEN 'prompt' THEN 0 WHEN 'character' THEN 0 WHEN 'description' THEN 0 WHEN 'negative' THEN 1 ELSE 2 END, freq DESC, t.tag ASC LIMIT ?"
+        "ORDER BY CASE t.kind WHEN 'prompt' THEN 0 WHEN 'rating' THEN 0 WHEN 'character' THEN 0 WHEN 'description' THEN 0 WHEN 'negative' THEN 1 ELSE 2 END, freq DESC, t.tag ASC LIMIT ?"
     )
     rows = conn.execute(sql, (*params, limit)).fetchall()
     return [
-        {"tag": row[0], "norm": row[1], "kind": row[2], "freq": row[3]}
-        for row in rows
+        {"tag": row[0], "norm": row[1], "kind": row[2], "freq": row[3]} for row in rows
     ]
 
 
-def matched_image_ids(conn: sqlite3.Connection, tokens: Sequence[QueryToken]) -> List[int]:
+def matched_image_ids(
+    conn: sqlite3.Connection, tokens: Sequence[QueryToken]
+) -> List[int]:
     if not tokens:
         rows = conn.execute("SELECT id FROM images").fetchall()
         return [row[0] for row in rows]
@@ -122,7 +124,7 @@ def autocomplete_tags(
     if not prefix:
         sql = "SELECT tag, norm, kind, COUNT(DISTINCT image_id) AS freq FROM tags"
         params: List[object] = []
-        if kind_filter in ("prompt", "negative", "character", "description"):
+        if kind_filter in ("prompt", "negative", "character", "description", "rating"):
             sql += " WHERE kind = ?"
             params.append(kind_filter)
         sql += " GROUP BY norm, kind ORDER BY freq DESC LIMIT ?"
@@ -136,7 +138,7 @@ def autocomplete_tags(
             "SELECT tag, norm, kind, COUNT(DISTINCT image_id) AS freq "
             "FROM tag_index WHERE tag_index MATCH ?"
         )
-        if kind_filter in ("prompt", "negative", "character", "description"):
+        if kind_filter in ("prompt", "negative", "character", "description", "rating"):
             sql += " AND kind = ?"
             params.append(kind_filter)
         sql += " GROUP BY norm, kind ORDER BY freq DESC"
@@ -145,11 +147,9 @@ def autocomplete_tags(
         results = list(rows)
         like_pattern = f"%{norm}%"
         if norm and len(norm) >= 2:
-            like_sql = (
-                "SELECT tag, norm, kind, COUNT(DISTINCT image_id) AS freq FROM tags WHERE norm LIKE ?"
-            )
+            like_sql = "SELECT tag, norm, kind, COUNT(DISTINCT image_id) AS freq FROM tags WHERE norm LIKE ?"
             like_params: List[object] = [like_pattern]
-            if kind_filter in ("prompt", "negative", "character", "description"):
+            if kind_filter in ("prompt", "negative", "character", "description", "rating"):
                 like_sql += " AND kind = ?"
                 like_params.append(kind_filter)
             like_sql += " GROUP BY norm, kind ORDER BY freq DESC LIMIT ?"
@@ -161,8 +161,7 @@ def autocomplete_tags(
                     seen.add(key)
         rows = results[:limit]
     return [
-        {"tag": row[0], "norm": row[1], "kind": row[2], "freq": row[3]}
-        for row in rows
+        {"tag": row[0], "norm": row[1], "kind": row[2], "freq": row[3]} for row in rows
     ]
 
 
@@ -179,7 +178,7 @@ def fetch_tags_for_images(
     ).fetchall()
     grouped: Dict[int, List[Dict[str, object]]] = defaultdict(list)
     for image_id, tag, norm, kind, source in rows:
-        if kind not in ("prompt", "character", "negative"):
+        if kind not in ("prompt", "character", "negative", "rating"):
             continue
         grouped[image_id].append(
             {

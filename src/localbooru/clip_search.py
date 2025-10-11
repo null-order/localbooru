@@ -125,11 +125,10 @@ def perform_clip_search(
 
     image_ids: List[int] = []
     matrix: List[np.ndarray] = []
-    for row in db.iter_clip_vectors(config.clip_model_key):
-        image_id = int(row["image_id"])
+    for image_id, blob in db.iter_clip_vectors(config.clip_model_key):
+        image_id = int(image_id)
         if allowed_ids is not None and image_id not in allowed_ids:
             continue
-        blob = row["vector"]
         vec = np.frombuffer(blob, dtype=np.float32)
         if vec.size == 0:
             continue

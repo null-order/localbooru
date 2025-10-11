@@ -1,6 +1,8 @@
 """SQLite persistence layer for localbooru."""
+
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from contextlib import closing
@@ -13,35 +15,99 @@ SCHEMA_STATEMENTS = [
     "PRAGMA journal_mode=WAL;",
     "PRAGMA synchronous=NORMAL;",
     "PRAGMA foreign_keys = ON;",
-    "CREATE TABLE IF NOT EXISTS images (\n        id INTEGER PRIMARY KEY,\n        path TEXT UNIQUE NOT NULL,\n        name TEXT NOT NULL,\n        mtime REAL NOT NULL,\n        size INTEGER NOT NULL,\n        width INTEGER,\n        height INTEGER,\n        seed TEXT,\n        model TEXT,\n        source TEXT,\n        description TEXT,\n        metadata_json TEXT\n    );",
-    "CREATE TABLE IF NOT EXISTS tags (\n        id INTEGER PRIMARY KEY,\n        image_id INTEGER NOT NULL,\n        tag TEXT NOT NULL,\n        norm TEXT NOT NULL,\n        kind TEXT NOT NULL,\n        emphasis TEXT NOT NULL,\n        weight REAL NOT NULL,\n        raw TEXT NOT NULL,\n        source TEXT NOT NULL DEFAULT 'embedded',\n        FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE\n    );",
+    "CREATE TABLE IF NOT EXISTS images (\n"
+    "    id INTEGER PRIMARY KEY,\n"
+    "    path TEXT UNIQUE NOT NULL,\n"
+    "    name TEXT NOT NULL,\n"
+    "    mtime REAL NOT NULL,\n"
+    "    size INTEGER NOT NULL,\n"
+    "    width INTEGER,\n"
+    "    height INTEGER,\n"
+    "    seed TEXT,\n"
+    "    model TEXT,\n"
+    "    source TEXT,\n"
+    "    description TEXT,\n"
+    "    metadata_json TEXT\n"
+    ");",
+    "CREATE TABLE IF NOT EXISTS tags (\n"
+    "    id INTEGER PRIMARY KEY,\n"
+    "    image_id INTEGER NOT NULL,\n"
+    "    tag TEXT NOT NULL,\n"
+    "    norm TEXT NOT NULL,\n"
+    "    kind TEXT NOT NULL,\n"
+    "    emphasis TEXT NOT NULL,\n"
+    "    weight REAL NOT NULL,\n"
+    "    raw TEXT NOT NULL,\n"
+    "    source TEXT NOT NULL DEFAULT 'embedded',\n"
+    "    FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE\n"
+    ");",
     "CREATE INDEX IF NOT EXISTS tags_kind_norm_idx ON tags(kind, norm);",
     "CREATE INDEX IF NOT EXISTS tags_kind_norm_image_idx ON tags(kind, norm, image_id);",
-    "CREATE VIRTUAL TABLE IF NOT EXISTS tag_index USING fts5(\n        norm,\n        tag,\n        kind UNINDEXED,\n        image_id UNINDEXED,\n        tokenize=\"unicode61 tokenchars '_.:-'\"\n    );",
+    "CREATE VIRTUAL TABLE IF NOT EXISTS tag_index USING fts5(\n"
+    "    norm,\n"
+    "    tag,\n"
+    "    kind UNINDEXED,\n"
+    "    image_id UNINDEXED,\n"
+    "    tokenize=\"unicode61 tokenchars '_.:-'\"\n"
+    ");",
+    "CREATE TABLE IF NOT EXISTS clip_embeddings (\n"
+    "    image_id INTEGER PRIMARY KEY,\n"
+    "    model TEXT NOT NULL,\n"
+    "    status TEXT NOT NULL,\n"
+    "    vector BLOB,\n"
+    "    error TEXT,\n"
+    "    queued_at REAL NOT NULL,\n"
+    "    updated_at REAL NOT NULL,\n"
+    "    FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE\n"
+    ");",
+    "CREATE TABLE IF NOT EXISTS auto_tag_jobs (\n"
+    "    image_id INTEGER PRIMARY KEY,\n"
+    "    status TEXT NOT NULL,\n"
+    "    model TEXT NOT NULL,\n"
+    "    error TEXT,\n"
+    "    queued_at REAL NOT NULL,\n"
+    "    updated_at REAL NOT NULL,\n"
+    "    FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE\n"
+    ");",
+    "CREATE TABLE IF NOT EXISTS rating_jobs (\n"
+    "    image_id INTEGER PRIMARY KEY,\n"
+    "    status TEXT NOT NULL,\n"
+    "    model TEXT NOT NULL,\n"
+    "    rating TEXT,\n"
+    "    confidence REAL,\n"
+    "    scores_json TEXT,\n"
+    "    error TEXT,\n"
+    "    queued_at REAL NOT NULL,\n"
+    "    updated_at REAL NOT NULL,\n"
+    "    FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE\n"
+    ");",
     "DROP TRIGGER IF EXISTS tags_ai;",
     "DROP TRIGGER IF EXISTS tags_ad;",
     "DROP TRIGGER IF EXISTS tags_au;",
-    "CREATE TRIGGER tags_ai AFTER INSERT ON tags BEGIN\n        INSERT INTO tag_index(rowid, norm, tag, kind, image_id)\n        VALUES (new.id, new.norm, new.tag, new.kind, CAST(new.image_id AS TEXT));\n    END;",
-    "CREATE TRIGGER tags_ad AFTER DELETE ON tags BEGIN\n        DELETE FROM tag_index WHERE rowid = old.id;\n    END;",
-    "CREATE TRIGGER tags_au AFTER UPDATE ON tags BEGIN\n        DELETE FROM tag_index WHERE rowid = old.id;\n        INSERT INTO tag_index(rowid, norm, tag, kind, image_id)\n        VALUES (new.id, new.norm, new.tag, new.kind, CAST(new.image_id AS TEXT));\n    END;",
-    "CREATE TABLE IF NOT EXISTS clip_embeddings (\n        image_id INTEGER PRIMARY KEY,\n        model TEXT NOT NULL,\n        status TEXT NOT NULL DEFAULT 'pending',\n        vector BLOB,\n        queued_at REAL NOT NULL,\n        updated_at REAL NOT NULL,\n        error TEXT,\n        FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE\n    );",
-    "CREATE INDEX IF NOT EXISTS clip_embeddings_status_idx ON clip_embeddings(status, model);",
-    "CREATE TABLE IF NOT EXISTS auto_tag_jobs (\n        image_id INTEGER PRIMARY KEY,\n        status TEXT NOT NULL DEFAULT 'pending',\n        model TEXT,\n        queued_at REAL NOT NULL,\n        updated_at REAL NOT NULL,\n        error TEXT,\n        FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE\n    );",
-    "CREATE INDEX IF NOT EXISTS auto_tag_jobs_status_idx ON auto_tag_jobs(status);",
+    "CREATE TRIGGER IF NOT EXISTS tags_ai AFTER INSERT ON tags BEGIN\n"
+    "    INSERT INTO tag_index(rowid, norm, tag, kind, image_id)\n"
+    "    VALUES (new.id, new.norm, new.tag, new.kind, new.image_id);\n"
+    "END;",
+    "CREATE TRIGGER IF NOT EXISTS tags_ad AFTER DELETE ON tags BEGIN\n"
+    "    INSERT INTO tag_index(tag_index, rowid, norm, tag, kind, image_id)\n"
+    "    VALUES ('delete', old.id, old.norm, old.tag, old.kind, old.image_id);\n"
+    "END;",
+    "CREATE TRIGGER IF NOT EXISTS tags_au AFTER UPDATE ON tags BEGIN\n"
+    "    INSERT INTO tag_index(tag_index, rowid, norm, tag, kind, image_id)\n"
+    "    VALUES ('delete', old.id, old.norm, old.tag, old.kind, old.image_id);\n"
+    "    INSERT INTO tag_index(rowid, norm, tag, kind, image_id)\n"
+    "    VALUES (new.id, new.norm, new.tag, new.kind, new.image_id);\n"
+    "END;",
 ]
 
 
 class LocalBooruDatabase:
-    """Wrap the SQLite database and expose helpers for images, tags, and CLIP data."""
-
-    def __init__(self, path: Path | str):
+    def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self._connection = sqlite3.connect(self.path, check_same_thread=False)
-        self._connection.row_factory = sqlite3.Row
+        self._connection = self.new_connection()
         self._ensure_schema()
 
     def close(self) -> None:
-        self._connection.commit()
         self._connection.close()
 
     @property
@@ -63,9 +129,26 @@ class LocalBooruDatabase:
             cols = {row[1] for row in cur.execute("PRAGMA table_info(images)")}
             if "description" not in cols:
                 cur.execute("ALTER TABLE images ADD COLUMN description TEXT")
+            if "rating" not in cols:
+                cur.execute("ALTER TABLE images ADD COLUMN rating TEXT")
+            if "rating_confidence" not in cols:
+                cur.execute("ALTER TABLE images ADD COLUMN rating_confidence REAL")
+            if "rating_updated" not in cols:
+                cur.execute("ALTER TABLE images ADD COLUMN rating_updated REAL")
             tag_cols = {row[1] for row in cur.execute("PRAGMA table_info(tags)")}
             if "source" not in tag_cols:
-                cur.execute("ALTER TABLE tags ADD COLUMN source TEXT NOT NULL DEFAULT 'embedded'")
+                cur.execute(
+                    "ALTER TABLE tags ADD COLUMN source TEXT NOT NULL DEFAULT 'embedded'"
+                )
+            # Normalize legacy rating tag norms from 'rating:explicit' -> 'explicit'
+            cur.execute(
+                "UPDATE tags SET norm=substr(norm, 8) WHERE kind='rating' AND norm LIKE 'rating:%'"
+            )
+            rating_job_cols = {
+                row[1] for row in cur.execute("PRAGMA table_info(rating_jobs)")
+            }
+            if "scores_json" not in rating_job_cols:
+                cur.execute("ALTER TABLE rating_jobs ADD COLUMN scores_json TEXT")
             self._connection.commit()
 
     # --- Image + tag operations ---------------------------------------------------------
@@ -110,29 +193,59 @@ class LocalBooruDatabase:
                 description,
                 metadata_json,
             )
-            changed = True
-            if existing:
-                if abs(existing["mtime"] - mtime) < 1e-6 and existing["size"] == size:
-                    changed = False
-                else:
-                    self._connection.execute(
-                        "UPDATE images SET path=?, name=?, mtime=?, size=?, width=?, height=?, seed=?, model=?, source=?, description=?, metadata_json=? WHERE id=?",
-                        row + (existing["id"],),
-                    )
-                image_id = existing["id"]
-                if changed:
-                    self._connection.execute("DELETE FROM tags WHERE image_id=?", (image_id,))
-            else:
-                self._connection.execute(
-                    "INSERT INTO images(path, name, mtime, size, width, height, seed, model, source, description, metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            if existing is None:
+                cur = self._connection.execute(
+                    "INSERT INTO images "
+                    "(path, name, mtime, size, width, height, seed, model, source, description, metadata_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     row,
                 )
-                image_id = self._connection.execute("SELECT id FROM images WHERE path=?", (rel_path,)).fetchone()[0]
+                image_id = cur.lastrowid
                 changed = True
-            if changed:
-                for tag in tags:
+            else:
+                cur = self._connection.execute(
+                    "UPDATE images SET "
+                    "name=?, mtime=?, size=?, width=?, height=?, seed=?, model=?, source=?, description=?, metadata_json=? "
+                    "WHERE path=?",
+                    (*row, rel_path),
+                )
+                image_id = existing["id"]
+                changed = cur.rowcount > 0
+
+            if not tags:
+                self._connection.execute(
+                    "DELETE FROM tags WHERE image_id=?",
+                    (image_id,),
+                )
+                return image_id, changed
+
+            existing_tags = set(
+                row["norm"]
+                for row in self._connection.execute(
+                    "SELECT norm FROM tags WHERE image_id=?",
+                    (image_id,),
+                )
+            )
+            new_norms = {tag.norm for tag in tags}
+
+            to_delete = existing_tags - new_norms
+            to_insert = new_norms - existing_tags
+            to_update = existing_tags & new_norms
+
+            if to_delete:
+                self._connection.execute(
+                    "DELETE FROM tags WHERE image_id=? AND norm IN ({})".format(
+                        ",".join("?" * len(to_delete))
+                    ),
+                    (image_id, *to_delete),
+                )
+
+            for tag in tags:
+                if tag.norm in to_insert:
                     self._connection.execute(
-                        "INSERT INTO tags(image_id, tag, norm, kind, emphasis, weight, raw, source) VALUES (?,?,?,?,?,?,?,?)",
+                        "INSERT INTO tags "
+                        "(image_id, tag, norm, kind, emphasis, weight, raw, source) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             image_id,
                             tag.tag,
@@ -141,9 +254,28 @@ class LocalBooruDatabase:
                             tag.emphasis,
                             tag.weight,
                             tag.raw,
-                            getattr(tag, "source", "embedded"),
+                            tag.source or "embedded",
                         ),
                     )
+                elif tag.norm in to_update:
+                    self._connection.execute(
+                        "UPDATE tags SET "
+                        "tag=?, kind=?, emphasis=?, weight=?, raw=?, source=? "
+                        "WHERE image_id=? AND norm=?",
+                        (
+                            tag.tag,
+                            tag.kind,
+                            tag.emphasis,
+                            tag.weight,
+                            tag.raw,
+                            tag.source or "embedded",
+                            image_id,
+                            tag.norm,
+                        ),
+                    )
+
+            changed = changed or bool(to_delete or to_insert or to_update)
+
         return image_id, changed
 
     def delete_missing_images(self, existing_paths: Iterable[str]) -> int:
@@ -158,7 +290,9 @@ class LocalBooruDatabase:
 
     # --- CLIP embedding operations ------------------------------------------------------
 
-    def ensure_clip_entry(self, image_id: int, model: str, force_reset: bool = False) -> None:
+    def ensure_clip_entry(
+        self, image_id: int, model: str, force_reset: bool = False
+    ) -> None:
         now = time.time()
         with self._connection:
             row = self._connection.execute(
@@ -172,7 +306,11 @@ class LocalBooruDatabase:
                 )
             else:
                 status = row["status"]
-                if force_reset or row["model"] != model or status in {"error", "missing"}:
+                if (
+                    force_reset
+                    or row["model"] != model
+                    or status in {"error", "missing"}
+                ):
                     self._connection.execute(
                         "UPDATE clip_embeddings SET model=?, status='pending', vector=NULL, error=NULL, queued_at=?, updated_at=? WHERE image_id=?",
                         (model, now, now, image_id),
@@ -198,72 +336,71 @@ class LocalBooruDatabase:
         finally:
             conn.close()
 
-    def mark_clip_error(self, image_id: int, message: str) -> None:
-        with self._connection:
-            now = time.time()
-            self._connection.execute(
-                "UPDATE clip_embeddings SET status='error', error=?, updated_at=? WHERE image_id=?",
-                (message[:512], now, image_id),
-            )
+    def mark_clip_error(self, image_id: int, error: str) -> None:
+        now = time.time()
+        self._connection.execute(
+            "UPDATE clip_embeddings SET status='error', error=?, updated_at=? WHERE image_id=?",
+            (error, now, image_id),
+        )
 
     def store_clip_vector(self, image_id: int, model: str, vector: bytes) -> None:
         now = time.time()
-        conn = self.new_connection()
-        try:
-            with conn:
-                conn.execute(
-                    "UPDATE clip_embeddings SET status='ready', model=?, vector=?, error=NULL, updated_at=? WHERE image_id=?",
-                    (model, vector, now, image_id),
-                )
-        finally:
-            conn.close()
+        with self._connection:
+            self._connection.execute(
+                "UPDATE clip_embeddings SET status='ready', model=?, vector=?, updated_at=? WHERE image_id=?",
+                (model, vector, now, image_id),
+            )
 
     def clip_progress_counts(self, model: str) -> Tuple[int, int, int, int]:
-        row = self._connection.execute(
-            "SELECT COUNT(*) AS total, "
-            "SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END) AS completed, "
-            "SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) AS processing, "
-            "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
-            "FROM clip_embeddings WHERE model=?",
-            (model,),
-        ).fetchone()
-        total = int(row["total"] or 0)
-        completed = int(row["completed"] or 0)
-        processing = int(row["processing"] or 0)
-        errors = int(row["errors"] or 0)
-        return total, completed, processing, errors
+        with self._connection:
+            row = self._connection.execute(
+                "SELECT "
+                "COUNT(*) AS total, "
+                "SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END) AS completed, "
+                "SUM(CASE WHEN status IN ('pending', 'processing') THEN 1 ELSE 0 END) AS processing, "
+                "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
+                "FROM clip_embeddings WHERE model=?",
+                (model,),
+            ).fetchone()
+            return (
+                row["total"] or 0,
+                row["completed"] or 0,
+                row["processing"] or 0,
+                row["errors"] or 0,
+            )
 
-    def iter_clip_vectors(self, model: str) -> Iterator[sqlite3.Row]:
-        cur = self._connection.execute(
-            "SELECT ce.image_id, ce.vector FROM clip_embeddings ce WHERE ce.status='ready' AND ce.model=?",
+    def iter_clip_vectors(self, model: str) -> Iterator[Tuple[int, bytes]]:
+        for row in self._connection.execute(
+            "SELECT image_id, vector FROM clip_embeddings WHERE model=? AND status='ready' AND vector IS NOT NULL",
             (model,),
-        )
-        for row in cur:
-            yield row
+        ):
+            yield row["image_id"], row["vector"]
 
     def purge_clip_vectors(self, model: str) -> None:
-        with self._connection:
-            self._connection.execute("DELETE FROM clip_embeddings WHERE model=?", (model,))
+        self._connection.execute(
+            "DELETE FROM clip_embeddings WHERE model=?",
+            (model,),
+        )
 
     def fetch_clip_vector(self, image_id: int, model: str) -> Optional[bytes]:
         row = self._connection.execute(
             "SELECT vector FROM clip_embeddings WHERE image_id=? AND model=? AND status='ready'",
             (image_id, model),
         ).fetchone()
-        if row is None:
-            return None
-        return row["vector"]
+        return row["vector"] if row else None
 
     def has_ready_clip(self, image_id: int, model: str) -> bool:
         row = self._connection.execute(
-            "SELECT status FROM clip_embeddings WHERE image_id=? AND model=?",
+            "SELECT 1 FROM clip_embeddings WHERE image_id=? AND model=? AND status='ready'",
             (image_id, model),
         ).fetchone()
         return bool(row and row["status"] == "ready")
 
     # --- Auto-tag operations ---------------------------------------------------------
 
-    def ensure_auto_tag_job(self, image_id: int, model: str, force_reset: bool = False) -> None:
+    def ensure_auto_tag_job(
+        self, image_id: int, model: str, force_reset: bool = False
+    ) -> None:
         now = time.time()
         with self._connection:
             row = self._connection.execute(
@@ -307,19 +444,14 @@ class LocalBooruDatabase:
                 now = time.time()
                 conn.executemany(
                     "UPDATE auto_tag_jobs SET status='processing', updated_at=? WHERE image_id=?",
-                    [(now, row["image_id"]) for row in rows],
+                    ((now, row["image_id"]) for row in rows),
                 )
                 return rows
         finally:
             conn.close()
 
-    def _execute_auto_job_update(self, sql: str, params: Sequence[object]) -> None:
-        conn = self.new_connection()
-        try:
-            with conn:
-                conn.execute(sql, params)
-        finally:
-            conn.close()
+    def _execute_auto_job_update(self, sql: str, params: Tuple) -> None:
+        self._connection.execute(sql, params)
 
     def mark_auto_tag_ready(self, image_id: int) -> None:
         now = time.time()
@@ -330,118 +462,307 @@ class LocalBooruDatabase:
 
     def mark_auto_tag_skipped(self, image_id: int) -> None:
         now = time.time()
-        self._execute_auto_job_update(
+        self._connection.execute(
             "UPDATE auto_tag_jobs SET status='skipped', updated_at=? WHERE image_id=?",
             (now, image_id),
         )
 
-    def mark_auto_tag_error(self, image_id: int, message: str) -> None:
+    def mark_auto_tag_error(self, image_id: int, error: str) -> None:
         now = time.time()
-        self._execute_auto_job_update(
+        self._connection.execute(
             "UPDATE auto_tag_jobs SET status='error', error=?, updated_at=? WHERE image_id=?",
-            (message[:512], now, image_id),
+            (error, now, image_id),
         )
 
     def apply_auto_tags(
         self,
         image_id: int,
         tags: Sequence[TagRecord],
-        *,
         strategy: str,
+        rating_scores: Optional[Dict[str, float]] = None,
     ) -> str:
-        mode = (strategy or "missing").lower()
+        result = "skipped"
         with self._connection:
-            manual_pairs = {
-                (row["kind"], row["norm"])
-                for row in self._connection.execute(
-                    "SELECT kind, norm FROM tags WHERE image_id=? AND source <> 'auto'",
+            row = self._connection.execute(
+                "SELECT path FROM images WHERE id=?",
+                (image_id,),
+            ).fetchone()
+            if not row:
+                return "missing"
+
+            existing_tags = {
+                (tag["norm"], tag["kind"])
+                for tag in self._connection.execute(
+                    "SELECT norm, kind FROM tags WHERE image_id=?",
                     (image_id,),
                 )
             }
 
-            if mode != "augment" and manual_pairs:
+            if strategy == "missing":
+                # Only add tags not already present (by norm+kind)
+                to_add = [
+                    tag
+                    for tag in tags
+                    if (tag.norm, tag.kind) not in existing_tags and tag.weight >= 0.0
+                ]
+                if not to_add:
+                    return "skipped"
+            else:  # "augment"
+                to_add = [tag for tag in tags if tag.weight >= 0.0]
+
+            if not to_add:
                 return "skipped"
 
-            current_auto = {
-                (row["kind"], row["norm"]): (
-                    row["tag"],
-                    float(row["weight"] or 0.0),
-                    row["emphasis"],
-                    row["raw"],
-                )
-                for row in self._connection.execute(
-                    "SELECT kind, norm, tag, weight, emphasis, raw FROM tags WHERE image_id=? AND source='auto'",
-                    (image_id,),
-                )
-            }
-
-            normalized_new: Dict[tuple[str, str], tuple[str, float, str, str]] = {}
-            for tag in tags:
-                key = (tag.kind, tag.norm)
-                if key in normalized_new or key in manual_pairs:
-                    continue
-                normalized_new[key] = (
-                    tag.tag,
-                    float(tag.weight),
-                    tag.emphasis,
-                    tag.raw,
-                )
-
-            if normalized_new == current_auto:
-                return "empty"
-
-            self._connection.execute(
-                "DELETE FROM tags WHERE image_id=? AND source=?",
-                (image_id, "auto"),
-            )
-
-            existing = set(manual_pairs)
-            inserted = 0
-            for (kind, norm), (tag_value, weight_value, emphasis_value, raw_value) in normalized_new.items():
-                if (kind, norm) in existing:
-                    continue
+            # Insert new tags
+            for tag in to_add:
                 self._connection.execute(
-                    "INSERT INTO tags(image_id, tag, norm, kind, emphasis, weight, raw, source) VALUES (?,?,?,?,?,?,?,?)",
+                    "INSERT INTO tags "
+                    "(image_id, tag, norm, kind, emphasis, weight, raw, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         image_id,
-                        tag_value,
-                        norm,
-                        kind,
-                        emphasis_value,
-                        weight_value,
-                        raw_value,
+                        tag.tag,
+                        tag.norm,
+                        tag.kind,
+                        tag.emphasis,
+                        tag.weight,
+                        tag.raw,
                         "auto",
                     ),
                 )
-                existing.add((kind, norm))
-                inserted += 1
+            result = "applied"
 
-            return "updated" if inserted else "empty"
+        if rating_scores:
+            self.update_rating_from_scores(image_id, rating_scores)
+
+        return result
 
     def auto_tag_progress_counts(self) -> Tuple[int, int, int, int]:
+        with self._connection:
+            row = self._connection.execute(
+                "SELECT "
+                "COUNT(*) AS total, "
+                "SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END) AS completed, "
+                "SUM(CASE WHEN status IN ('pending', 'processing') THEN 1 ELSE 0 END) AS processing, "
+                "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
+                "FROM auto_tag_jobs",
+                (),
+            ).fetchone()
+            return (
+                row["total"] or 0,
+                row["completed"] or 0,
+                row["processing"] or 0,
+                row["errors"] or 0,
+            )
+
+    def rating_counts(self) -> Dict[str, int]:
+        rows = self._connection.execute(
+            "SELECT norm, COUNT(DISTINCT image_id) AS freq FROM tags WHERE kind='rating' GROUP BY norm",
+        ).fetchall()
+        return {
+            (row["norm"] or "").lower(): int(row["freq"] or 0)
+            for row in rows
+            if row
+        }
+
+    # --- Rating operations ---------------------------------------------------------
+
+    def update_rating_from_scores(
+        self,
+        image_id: int,
+        scores: Dict[str, float],
+        *,
+        model: str = "wd14",
+    ) -> None:
+        if not scores:
+            return
+        normalized = {
+            str(label).lower(): float(value)
+            for label, value in scores.items()
+            if isinstance(value, (int, float))
+        }
+        if not normalized:
+            return
+        best_label, best_score = max(normalized.items(), key=lambda item: item[1])
+        now = time.time()
+        scores_json = json.dumps(normalized, sort_keys=True)
+        with self._connection:
+            self._connection.execute(
+                "UPDATE images SET rating=?, rating_confidence=?, rating_updated=? WHERE id=?",
+                (best_label, best_score, now, image_id),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO rating_jobs(image_id, status, model, rating, confidence, scores_json, error, queued_at, updated_at)
+                VALUES (?, 'ready', ?, ?, ?, ?, NULL, ?, ?)
+                ON CONFLICT(image_id) DO UPDATE SET
+                    status=excluded.status,
+                    model=excluded.model,
+                    rating=excluded.rating,
+                    confidence=excluded.confidence,
+                    scores_json=excluded.scores_json,
+                    error=NULL,
+                    updated_at=excluded.updated_at
+                """,
+                (image_id, model, best_label, best_score, scores_json, now, now),
+            )
+
+    def ensure_rating_job(
+        self, image_id: int, model: str, force_reset: bool = False
+    ) -> None:
+        now = time.time()
+        with self._connection:
+            row = self._connection.execute(
+                "SELECT status, model FROM rating_jobs WHERE image_id=?",
+                (image_id,),
+            ).fetchone()
+            if row is None:
+                self._connection.execute(
+                    "INSERT INTO rating_jobs(image_id, status, model, queued_at, updated_at) VALUES (?,?,?,?,?)",
+                    (image_id, "pending", model, now, now),
+                )
+            else:
+                status = row["status"]
+                stored_model = row["model"]
+                reset_needed = False
+                if force_reset:
+                    reset_needed = True
+                elif stored_model != model:
+                    reset_needed = True
+                elif status in {"error", "missing"}:
+                    reset_needed = True
+
+                if reset_needed:
+                    self._connection.execute(
+                        "UPDATE rating_jobs SET status='pending', model=?, rating=NULL, confidence=NULL, error=NULL, queued_at=?, updated_at=? WHERE image_id=?",
+                        (model, now, now, image_id),
+                    )
+
+    def reserve_rating_batch(self, model: str, limit: int) -> List[sqlite3.Row]:
+        conn = self.new_connection()
+        try:
+            with conn:
+                rows = conn.execute(
+                    "SELECT j.image_id, i.path FROM rating_jobs j "
+                    "JOIN images i ON i.id = j.image_id "
+                    "WHERE j.status = 'pending' AND j.model = ? "
+                    "ORDER BY j.queued_at ASC LIMIT ?",
+                    (model, limit),
+                ).fetchall()
+                if not rows:
+                    return []
+                now = time.time()
+                conn.executemany(
+                    "UPDATE rating_jobs SET status='processing', updated_at=? WHERE image_id=?",
+                    ((now, row["image_id"]) for row in rows),
+                )
+                return rows
+        finally:
+            conn.close()
+
+    def mark_rating_ready(self, image_id: int) -> None:
+        now = time.time()
+        self._connection.execute(
+            "UPDATE rating_jobs SET status='ready', error=NULL, updated_at=? WHERE image_id=?",
+            (now, image_id),
+        )
+
+    def mark_rating_error(self, image_id: int, error: str) -> None:
+        now = time.time()
+        self._connection.execute(
+            "UPDATE rating_jobs SET status='error', error=?, updated_at=? WHERE image_id=?",
+            (error, now, image_id),
+        )
+
+    def store_rating(
+        self,
+        image_id: int,
+        rating: str,
+        confidence: float,
+        scores: Optional[Dict[str, float]] = None,
+    ) -> None:
+        now = time.time()
+        existing_scores_json = None
         row = self._connection.execute(
-            "SELECT COUNT(*) AS total, "
-            "SUM(CASE WHEN status IN ('ready', 'skipped') THEN 1 ELSE 0 END) AS completed, "
-            "SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) AS processing, "
-            "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
-            "FROM auto_tag_jobs",
+            "SELECT scores_json FROM rating_jobs WHERE image_id=?",
+            (image_id,),
         ).fetchone()
-        if row is None:
-            return 0, 0, 0, 0
-        total = int(row["total"] or 0)
-        completed = int(row["completed"] or 0)
-        processing = int(row["processing"] or 0)
-        errors = int(row["errors"] or 0)
-        return total, completed, processing, errors
+        if row and row["scores_json"]:
+            existing_scores_json = row["scores_json"]
+
+        if scores and isinstance(scores, dict):
+            normalized = {
+                str(label).lower(): float(value)
+                for label, value in scores.items()
+                if isinstance(value, (int, float))
+            }
+            scores_json = json.dumps(normalized, sort_keys=True)
+        else:
+            scores_json = existing_scores_json
+
+        with self._connection:
+            self._connection.execute(
+                "UPDATE images SET rating=?, rating_confidence=?, rating_updated=? WHERE id=?",
+                (rating, confidence, now, image_id),
+            )
+            self._connection.execute(
+                "DELETE FROM tags WHERE image_id=? AND kind='rating' AND source!='auto'",
+                (image_id,),
+            )
+            tag = f"rating:{rating}"
+            norm = rating.lower()
+            raw_value = f"dbrating:{tag}:{confidence:.3f}"
+            self._connection.execute(
+                """INSERT INTO tags
+                   (image_id, tag, norm, kind, emphasis, weight, raw, source)
+                   VALUES (?, ?, ?, 'rating', 'normal', ?, ?, 'dbrating')""",
+                (image_id, tag, norm, confidence, raw_value),
+            )
+            self._connection.execute(
+                "UPDATE rating_jobs SET rating=?, confidence=?, scores_json=?, updated_at=? WHERE image_id=?",
+                (rating, confidence, scores_json, now, image_id),
+            )
+
+    def rating_progress_counts(self) -> Tuple[int, int, int, int]:
+        with self._connection:
+            row = self._connection.execute(
+                "SELECT "
+                "COUNT(*) AS total, "
+                "SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END) AS completed, "
+                "SUM(CASE WHEN status IN ('pending', 'processing') THEN 1 ELSE 0 END) AS processing, "
+                "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
+                "FROM rating_jobs",
+                (),
+            ).fetchone()
+            return (
+                row["total"] or 0,
+                row["completed"] or 0,
+                row["processing"] or 0,
+                row["errors"] or 0,
+            )
+
+    # --- Query helpers -----------------------------------------------------------------
+
+    def get_rating_job_status(self, image_id: int) -> Optional[str]:
+        row = self._connection.execute(
+            "SELECT status FROM rating_jobs WHERE image_id=?",
+            (image_id,),
+        ).fetchone()
+        return row["status"] if row else None
 
     def get_auto_job_status(self, image_id: int) -> Optional[str]:
         row = self._connection.execute(
             "SELECT status FROM auto_tag_jobs WHERE image_id=?",
             (image_id,),
         ).fetchone()
-        if row is None:
-            return None
-        return str(row["status"])
+        return row["status"] if row else None
+
+    def has_rating(self, image_id: int) -> bool:
+        row = self._connection.execute(
+            "SELECT rating FROM images WHERE id=?",
+            (image_id,),
+        ).fetchone()
+        return bool(row and row["rating"])
 
     def has_auto_tags(self, image_id: int) -> bool:
         row = self._connection.execute(
@@ -450,42 +771,59 @@ class LocalBooruDatabase:
         ).fetchone()
         return bool(row)
 
-    def get_auto_job_details(self, image_id: int) -> Optional[Dict[str, object]]:
+    def has_rating_tag(self, image_id: int) -> bool:
         row = self._connection.execute(
-            "SELECT status, queued_at FROM auto_tag_jobs WHERE image_id=?",
+            "SELECT 1 FROM tags WHERE image_id=? AND kind='rating' LIMIT 1",
             (image_id,),
         ).fetchone()
-        if row is None:
+        return bool(row)
+
+    def get_auto_job_details(self, image_id: int) -> Optional[Dict[str, object]]:
+        row = self._connection.execute(
+            "SELECT status, model, error, queued_at, updated_at FROM auto_tag_jobs WHERE image_id=?",
+            (image_id,),
+        ).fetchone()
+        if not row:
             return None
-        status = str(row["status"])
-        details: Dict[str, object] = {"status": status}
-        if status == "pending":
-            queued_at = row["queued_at"]
-            pos_row = self._connection.execute(
-                "SELECT COUNT(*) FROM auto_tag_jobs WHERE status='pending' AND queued_at <= ?",
-                (queued_at,),
-            ).fetchone()
-            details["position"] = int(pos_row[0]) if pos_row else None
-        elif status == "processing":
-            details["position"] = 0
-        else:
-            details["position"] = None
-        return details
+        return {
+            "status": row["status"],
+            "model": row["model"],
+            "error": row["error"],
+            "queued_at": row["queued_at"],
+            "updated_at": row["updated_at"],
+        }
 
     def load_auto_tag_jobs(self) -> Dict[int, Tuple[str, Optional[str]]]:
-        rows = self._connection.execute(
-            "SELECT image_id, status, model FROM auto_tag_jobs"
-        ).fetchall()
         jobs: Dict[int, Tuple[str, Optional[str]]] = {}
-        for row in rows:
-            image_id = int(row["image_id"])
-            status = str(row["status"])
-            model = row["model"]
-            jobs[image_id] = (status, model)
+        for row in self._connection.execute(
+            "SELECT image_id, status, model FROM auto_tag_jobs",
+            (),
+        ):
+            jobs[row["image_id"]] = (row["status"], row["model"])
         return jobs
 
     def load_auto_tagged_ids(self) -> Set[int]:
-        rows = self._connection.execute(
-            "SELECT DISTINCT image_id FROM tags WHERE source='auto'"
-        ).fetchall()
-        return {int(row["image_id"]) for row in rows}
+        return {
+            row["image_id"]
+            for row in self._connection.execute(
+                "SELECT DISTINCT image_id FROM tags WHERE source='auto'",
+                (),
+            )
+        }
+
+    # --- General query helpers ---------------------------------------------------------
+
+    def iter_image_paths(self) -> Iterator[str]:
+        for row in self._connection.execute(
+            "SELECT path FROM images ORDER BY mtime DESC"
+        ):
+            yield row["path"]
+
+    def iter_images(self, limit: int = 0, offset: int = 0) -> Iterator[sqlite3.Row]:
+        sql = "SELECT * FROM images ORDER BY mtime DESC, id DESC"
+        params = ()
+        if limit > 0:
+            sql += " LIMIT ? OFFSET ?"
+            params = (limit, offset)
+        for row in self._connection.execute(sql, params):
+            yield row

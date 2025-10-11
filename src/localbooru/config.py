@@ -1,4 +1,5 @@
 """Configuration helpers for localbooru."""
+
 from __future__ import annotations
 
 import os
@@ -30,6 +31,10 @@ class LocalBooruConfig:
     auto_tag_mode: str = "augment"
     auto_tag_background: bool = True
     auto_tag_batch_size: int = 4
+    rating_missing: bool = True
+    rating_model: str = "mobilenetv3_large_100_v0_ls0.2"
+    rating_background: bool = True
+    rating_batch_size: int = 4
     webview: bool = False
     no_ui: bool = False
     log_level: str = "INFO"
@@ -43,7 +48,9 @@ class LocalBooruConfig:
         if args.thumb_cache:
             thumb_cache = Path(args.thumb_cache).expanduser().resolve()
         else:
-            cache_root = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser()
+            cache_root = Path(
+                os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")
+            ).expanduser()
             thumb_cache = (cache_root / "localbooru" / "thumbs").resolve()
 
         auto_tag_missing = args.auto_tag_missing
@@ -53,6 +60,14 @@ class LocalBooruConfig:
         auto_tag_background = args.auto_tag_background
         if auto_tag_background is None:
             auto_tag_background = True
+
+        rating_missing = args.rate_missing
+        if rating_missing is None:
+            rating_missing = True
+
+        rating_background = args.rate_background
+        if rating_background is None:
+            rating_background = True
 
         return cls(
             root=root,
@@ -76,6 +91,10 @@ class LocalBooruConfig:
             auto_tag_mode=str(args.auto_tag_mode).lower(),
             auto_tag_background=auto_tag_background,
             auto_tag_batch_size=max(1, int(args.auto_tag_batch_size)),
+            rating_missing=rating_missing,
+            rating_model=args.rate_model,
+            rating_background=rating_background,
+            rating_batch_size=max(1, int(args.rate_batch_size)),
             webview=bool(args.webview),
             no_ui=args.no_ui,
             log_level=args.log_level,

@@ -1,4 +1,5 @@
 """HTTP server for localbooru."""
+
 from __future__ import annotations
 
 import base64
@@ -50,10 +51,13 @@ except ImportError:  # pragma: no cover - optional dependency
 
 FACET_KIND_ORDER = {
     "prompt": 0,
+    "rating": 0,
     "character": 0,
     "description": 0,
     "negative": 1,
 }
+
+RATING_CLASSES = ["general", "sensitive", "questionable", "explicit"]
 
 
 def _coerce_bool(value, default=True):
@@ -113,10 +117,14 @@ def summarize_facets_from_tag_map(
 class LocalBooruRequestHandler(BaseHTTPRequestHandler):
     server_version = "LocalBooru/0.1"
 
-    def _parse_multipart_form(self, body: bytes, content_type: str) -> Tuple[Dict[str, List[str]], List[Dict[str, object]]]:
+    def _parse_multipart_form(
+        self, body: bytes, content_type: str
+    ) -> Tuple[Dict[str, List[str]], List[Dict[str, object]]]:
         headers = f"Content-Type: {content_type}\r\n\r\n".encode("utf-8")
         try:
-            message = BytesParser(policy=default_email_policy).parsebytes(headers + body)
+            message = BytesParser(policy=default_email_policy).parsebytes(
+                headers + body
+            )
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.error("Failed to parse multipart form: %s", exc)
             return {}, []
@@ -210,9 +218,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 }
             )
 
-        facets_payload = (
-            summarize_facets_from_tag_map(tag_map) if include_tags else []
-        )
+        facets_payload = summarize_facets_from_tag_map(tag_map) if include_tags else []
 
         return {
             "results": payload_results,
@@ -231,12 +237,20 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         if path in {"/app.css", "/app.js"}:
             self._serve_frontend_asset(path.lstrip("/"))
             return
-        if path == "/api/status/clip":
+
+        if self.path == "/api/status/clip":
             self._handle_clip_status()
             return
-        if path == "/api/status/auto":
+        elif self.path == "/api/status/auto":
             self._handle_auto_status()
             return
+        elif self.path == "/api/rating_status":
+            self._handle_rating_status()
+            return
+        elif self.path == "/api/rating_counts":
+            self._handle_rating_counts()
+            return
+
         if path == "/api/images":
             self._handle_images(parsed.query)
             return
@@ -291,19 +305,28 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_auto_status(self) -> None:
         LOGGER.debug("GET /api/status/auto")
-        auto_progress: Optional[AutoTagProgress] = getattr(self.server, "auto_progress", None)
-        payload: Dict[str, object]
+        auto_progress = getattr(self.server, "auto_progress", None)
         if auto_progress is None:
-            payload = {"enabled": False}
+            self._send_json({"enabled": False})
         else:
-            snapshot = auto_progress.snapshot(self.server.db)  # type: ignore[attr-defined]
-            payload = {**snapshot, "enabled": True}
-        blob = json.dumps(payload).encode("utf-8")
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(blob)))
-        self.end_headers()
-        self.wfile.write(blob)
+            db: Optional[LocalBooruDatabase] = getattr(self.server, "db", None)
+            self._send_json(auto_progress.snapshot(db))
+
+    def _handle_rating_status(self) -> None:
+        LOGGER.debug("GET /api/rating_status")
+        rating_progress = getattr(self.server, "rating_progress", None)
+        if rating_progress is None:
+            self._send_json({"enabled": False})
+        else:
+            db: Optional[LocalBooruDatabase] = getattr(self.server, "db", None)
+            self._send_json(rating_progress.snapshot(db))
+
+    def _handle_rating_counts(self) -> None:
+        LOGGER.debug("GET /api/rating_counts")
+        db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
+        counts = db.rating_counts()
+        payload = {label: int(counts.get(label, 0)) for label in RATING_CLASSES}
+        self._send_json({"counts": payload})
 
     def _serve_index(self) -> None:
         index_file = Path(__file__).resolve().parent / "frontend" / "index.html"
@@ -383,6 +406,8 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 "description": row["description"],
                 "mtime": row["mtime"],
                 "size": row["size"],
+                "rating": row["rating"],
+                "rating_confidence": row["rating_confidence"],
                 "tags": tag_map.get(row["id"], []),
             }
             for row in rows
@@ -414,8 +439,12 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         clip_row = None
         auto_row = None
         auto_position: Optional[int] = None
+        rating_row = None
+        rating_position: Optional[int] = None
         try:
-            raw_row = conn.execute("SELECT * FROM images WHERE id=?", (image_id,)).fetchone()
+            raw_row = conn.execute(
+                "SELECT * FROM images WHERE id=?", (image_id,)
+            ).fetchone()
             if not raw_row:
                 self.send_error(HTTPStatus.NOT_FOUND, "Image not found")
                 return
@@ -484,6 +513,20 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                     ).fetchone()
                     if pos_row is not None:
                         auto_position = int(pos_row[0])
+            rating_row = conn.execute(
+                "SELECT status, queued_at, updated_at, model, rating, confidence, scores_json, error FROM rating_jobs WHERE image_id=?",
+                (image_id,),
+            ).fetchone()
+            if rating_row is not None:
+                status_value = rating_row["status"]
+                queued_value = rating_row["queued_at"]
+                if status_value == "pending" and queued_value is not None:
+                    pos_row = conn.execute(
+                        "SELECT COUNT(*) FROM rating_jobs WHERE status='pending' AND queued_at <= ?",
+                        (queued_value,),
+                    ).fetchone()
+                    if pos_row is not None:
+                        rating_position = int(pos_row[0])
         finally:
             conn.close()
 
@@ -493,9 +536,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         positive_prompt = metadata.get("prompt") if isinstance(metadata, dict) else None
         if not positive_prompt and isinstance(metadata, dict):
             positive_prompt = (
-                metadata.get("v4_prompt", {})
-                .get("caption", {})
-                .get("base_caption")
+                metadata.get("v4_prompt", {}).get("caption", {}).get("base_caption")
             )
         negative_prompt = metadata.get("uc") if isinstance(metadata, dict) else None
         if not negative_prompt and isinstance(metadata, dict):
@@ -543,6 +584,51 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 "negative": negative_prompt or "",
             },
         }
+        rating_value = row_get("rating")
+        rating_confidence = row_get("rating_confidence")
+        rating_updated = row_get("rating_updated")
+        rating_scores: Dict[str, float] = {}
+        if rating_row is not None:
+            raw_scores = rating_row["scores_json"]
+            if raw_scores:
+                try:
+                    parsed_scores = json.loads(raw_scores)
+                except json.JSONDecodeError:
+                    parsed_scores = {}
+                if isinstance(parsed_scores, dict):
+                    rating_scores = {
+                        str(k).lower(): float(v)
+                        for k, v in parsed_scores.items()
+                        if isinstance(v, (int, float))
+                    }
+        if not rating_scores:
+            for tag_entry in tag_rows:
+                tag_kind = tag_entry[2]
+                raw_payload = tag_entry[5]
+                if tag_kind != "rating" or not isinstance(raw_payload, str):
+                    continue
+                try:
+                    payload = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    continue
+                scores_payload = payload.get("scores") if isinstance(payload, dict) else None
+                if isinstance(scores_payload, dict):
+                    rating_scores = {
+                        str(k).lower(): float(v)
+                        for k, v in scores_payload.items()
+                        if isinstance(v, (int, float))
+                    }
+                    break
+        if not rating_value and rating_scores:
+            best_label, best_score = max(rating_scores.items(), key=lambda item: item[1])
+            rating_value = best_label
+            rating_confidence = best_score
+        data["rating"] = {
+            "value": rating_value,
+            "confidence": rating_confidence,
+            "updated": rating_updated,
+            "scores": rating_scores,
+        }
         for character in data["characters"]:
             for tag in character.get("tags", []):
                 tag_norm = tag.get("norm")
@@ -551,16 +637,23 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
 
         clip_enabled = False
         auto_enabled = False
+        rating_enabled = False
         config: Optional[LocalBooruConfig] = getattr(self.server, "config", None)  # type: ignore[attr-defined]
         if config:
             clip_enabled = bool(getattr(config, "clip_enabled", False))
-            auto_enabled = bool(getattr(config, "auto_tag_background", False) or getattr(config, "auto_tag_missing", False))
+            auto_enabled = bool(
+                getattr(config, "auto_tag_background", False)
+                or getattr(config, "auto_tag_missing", False)
+            )
+            rating_enabled = bool(getattr(config, "rating_missing", False))
 
         clip_info: Dict[str, object] = {"enabled": clip_enabled}
         if clip_row is not None:
             clip_info.update(
                 {
-                    "status": str(clip_row["status"]) if clip_row["status"] else "unknown",
+                    "status": str(clip_row["status"])
+                    if clip_row["status"]
+                    else "unknown",
                     "model": clip_row["model"],
                     "queued_at": clip_row["queued_at"],
                     "updated_at": clip_row["updated_at"],
@@ -572,7 +665,9 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             clip_info.update(
                 {
                     "status": "disabled" if not clip_enabled else "missing",
-                    "model": getattr(config, "clip_model_name", None) if config else None,
+                    "model": getattr(config, "clip_model_name", None)
+                    if config
+                    else None,
                     "queued_at": None,
                     "updated_at": None,
                     "error": None,
@@ -601,7 +696,9 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         if auto_row is not None:
             auto_info.update(
                 {
-                    "status": str(auto_row["status"]) if auto_row["status"] else "unknown",
+                    "status": str(auto_row["status"])
+                    if auto_row["status"]
+                    else "unknown",
                     "queued_at": auto_row["queued_at"],
                     "updated_at": auto_row["updated_at"],
                     "model": auto_row["model"],
@@ -614,7 +711,44 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                     "status": "disabled" if not auto_enabled else "missing",
                     "queued_at": None,
                     "updated_at": None,
-                    "model": getattr(config, "auto_tag_model", None) if config else None,
+                    "model": getattr(config, "auto_tag_model", None)
+                    if config
+                    else None,
+                    "error": None,
+                }
+            )
+
+        rating_has_value = bool(rating_value)
+        rating_info: Dict[str, object] = {
+            "enabled": rating_enabled,
+            "has_rating": rating_has_value or bool(rating_row and rating_row["rating"]),
+            "position": rating_position,
+            "confidence": rating_confidence,
+            "rating": rating_value,
+        }
+        if rating_scores:
+            rating_info["scores"] = rating_scores
+        if rating_row is not None:
+            rating_info.update(
+                {
+                    "status": str(rating_row["status"])
+                    if rating_row["status"]
+                    else "unknown",
+                    "queued_at": rating_row["queued_at"],
+                    "updated_at": rating_row["updated_at"],
+                    "model": rating_row["model"],
+                    "confidence": rating_row["confidence"],
+                    "error": rating_row["error"],
+                    "rating": rating_row["rating"] or rating_value,
+                }
+            )
+        else:
+            rating_info.update(
+                {
+                    "status": "disabled" if not rating_enabled else "missing",
+                    "queued_at": None,
+                    "updated_at": rating_updated,
+                    "model": getattr(config, "rating_model", None) if config else None,
                     "error": None,
                 }
             )
@@ -622,6 +756,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         data["processing"] = {
             "clip": clip_info,
             "auto": auto_info,
+            "rating": rating_info,
         }
 
         self._send_json(data)
@@ -677,10 +812,14 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         if isinstance(query, str) and query.strip():
             positive_queries.append(query.strip())
         if isinstance(positive, list):
-            positive_queries.extend(str(item) for item in positive if isinstance(item, str) and item.strip())
+            positive_queries.extend(
+                str(item) for item in positive if isinstance(item, str) and item.strip()
+            )
         negative_queries = []
         if isinstance(negative, list):
-            negative_queries.extend(str(item) for item in negative if isinstance(item, str) and item.strip())
+            negative_queries.extend(
+                str(item) for item in negative if isinstance(item, str) and item.strip()
+            )
 
         db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
         config: LocalBooruConfig = self.server.config  # type: ignore[attr-defined]
@@ -722,15 +861,21 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             config=config,
             positive_text=positive_queries,
             negative_text=negative_queries,
-            positive_images=positive_images if isinstance(positive_images, list) else [],
-            negative_images=negative_images if isinstance(negative_images, list) else [],
+            positive_images=positive_images
+            if isinstance(positive_images, list)
+            else [],
+            negative_images=negative_images
+            if isinstance(negative_images, list)
+            else [],
             limit=0,
             restrict_to_ids=restrict_ids,
             positive_vectors=positive_vectors or None,
         )
 
         total = len(full_results)
-        window = full_results[offset: offset + limit] if limit else full_results[offset:]
+        window = (
+            full_results[offset : offset + limit] if limit else full_results[offset:]
+        )
         payload = self._build_clip_response(
             window,
             total,
@@ -809,7 +954,9 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Failed to process image")
             return
         if getattr(features, "size", 0) == 0:
-            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "CLIP feature extraction failed")
+            self.send_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR, "CLIP feature extraction failed"
+            )
             return
         vector = features[0]
         vector = vector.astype(np.float32)
@@ -856,7 +1003,9 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         )
 
         total = len(full_results)
-        window = full_results[offset: offset + limit] if limit else full_results[offset:]
+        window = (
+            full_results[offset : offset + limit] if limit else full_results[offset:]
+        )
         payload = self._build_clip_response(
             window,
             total,
@@ -922,22 +1071,28 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
         conn = db.new_connection()
         try:
-            row = conn.execute("SELECT path FROM images WHERE id=?", (image_id,)).fetchone()
+            row = conn.execute(
+                "SELECT path FROM images WHERE id=?", (image_id,)
+            ).fetchone()
         finally:
             conn.close()
         if not row:
             return None
         return row["path"]
 
-    def _stream_path(self, path: Path, *, content_type: str, cache_control: str) -> None:
+    def _stream_path(
+        self, path: Path, *, content_type: str, cache_control: str
+    ) -> None:
         try:
             stat = path.stat()
-            with path.open('rb') as fh:
+            with path.open("rb") as fh:
                 self.send_response(HTTPStatus.OK)
-                self.send_header('Content-Type', content_type)
-                self.send_header('Content-Length', str(stat.st_size))
-                self.send_header('Cache-Control', cache_control)
-                self.send_header('Last-Modified', formatdate(stat.st_mtime, usegmt=True))
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(stat.st_size))
+                self.send_header("Cache-Control", cache_control)
+                self.send_header(
+                    "Last-Modified", formatdate(stat.st_mtime, usegmt=True)
+                )
                 self.end_headers()
                 shutil.copyfileobj(fh, self.wfile)
         except FileNotFoundError:
@@ -959,8 +1114,14 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         if resolved is None or not resolved.exists():
             self.send_error(HTTPStatus.NOT_FOUND, "File missing")
             return
-        content_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
-        self._stream_path(resolved, content_type=content_type, cache_control="public, max-age=31536000")
+        content_type = (
+            mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+        )
+        self._stream_path(
+            resolved,
+            content_type=content_type,
+            cache_control="public, max-age=31536000",
+        )
 
     def _handle_thumbnail(self, identifier: str) -> None:
         try:
@@ -978,12 +1139,24 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             return
         thumb_path = self.server.ensure_thumbnail(resolved)  # type: ignore[attr-defined]
         if thumb_path and thumb_path.exists():
-            self._stream_path(thumb_path, content_type="image/jpeg", cache_control="public, max-age=86400")
+            self._stream_path(
+                thumb_path,
+                content_type="image/jpeg",
+                cache_control="public, max-age=86400",
+            )
             return
-        fallback_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
-        self._stream_path(resolved, content_type=fallback_type, cache_control="public, max-age=31536000")
+        fallback_type = (
+            mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+        )
+        self._stream_path(
+            resolved,
+            content_type=fallback_type,
+            cache_control="public, max-age=31536000",
+        )
 
-    def log_message(self, format: str, *args) -> None:  # pragma: no cover - adjust logging
+    def log_message(
+        self, format: str, *args
+    ) -> None:  # pragma: no cover - adjust logging
         message = format % args
         if "/api/status/" in message:
             LOGGER.debug("%s - %s", self.address_string(), message)
@@ -1002,11 +1175,11 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def file_url_for(self, image_id: int, path: str) -> str:
-        digest = hashlib.sha1(path.encode('utf-8')).hexdigest()
+        digest = hashlib.sha1(path.encode("utf-8")).hexdigest()
         return f"/files/{image_id}?v={digest[:10]}"
 
     def thumb_url_for(self, image_id: int, path: str) -> str:
-        digest = hashlib.sha1(path.encode('utf-8')).hexdigest()
+        digest = hashlib.sha1(path.encode("utf-8")).hexdigest()
         return f"/thumbs/{image_id}?v={digest[:10]}"
 
 
@@ -1022,6 +1195,8 @@ class LocalBooruHTTPServer(ThreadingHTTPServer):
         clip_indexer: Optional[ClipIndexer] = None,
         auto_progress: Optional[AutoTagProgress] = None,
         auto_indexer: Optional[AutoTagIndexer] = None,
+        rating_progress: Optional[RatingProgress] = None,
+        rating_indexer: Optional[RatingIndexer] = None,
     ) -> None:
         super().__init__(server_address, RequestHandlerClass)
         self.config = config
@@ -1031,6 +1206,8 @@ class LocalBooruHTTPServer(ThreadingHTTPServer):
         self.clip_indexer = clip_indexer
         self.auto_progress = auto_progress
         self.auto_indexer = auto_indexer
+        self.rating_progress = rating_progress
+        self.rating_indexer = rating_indexer
         self._thumb_lock = threading.Lock()
 
         def _resolve_base(path: Path) -> Path:
@@ -1042,7 +1219,10 @@ class LocalBooruHTTPServer(ThreadingHTTPServer):
                 return path.absolute()
 
         if config is not None:
-            bases = [_resolve_base(config.root), *(_resolve_base(p) for p in config.extra_roots)]
+            bases = [
+                _resolve_base(config.root),
+                *(_resolve_base(p) for p in config.extra_roots),
+            ]
             # preserve order while removing duplicates
             self.allowed_roots = list(dict.fromkeys(bases))
             self.thumb_cache = _resolve_base(config.thumb_cache)
@@ -1084,7 +1264,7 @@ class LocalBooruHTTPServer(ThreadingHTTPServer):
 
     def thumbnail_cache_key(self, source: Path) -> str:
         resolved = source.resolve(strict=False)
-        return hashlib.sha1(str(resolved).encode('utf-8')).hexdigest()
+        return hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()
 
     def ensure_thumbnail(self, source: Path) -> Optional[Path]:
         if not self.pillow_available or Image is None:
@@ -1102,17 +1282,23 @@ class LocalBooruHTTPServer(ThreadingHTTPServer):
                 return dest
             try:
                 with Image.open(source) as img:
-                    img = img.convert('RGB')
-                    resample = getattr(Image, 'Resampling', None)
-                    if resample and hasattr(resample, 'LANCZOS'):
+                    img = img.convert("RGB")
+                    resample = getattr(Image, "Resampling", None)
+                    if resample and hasattr(resample, "LANCZOS"):
                         method = resample.LANCZOS
                     else:
-                        method = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', Image.BICUBIC))
+                        method = getattr(
+                            Image, "LANCZOS", getattr(Image, "ANTIALIAS", Image.BICUBIC)
+                        )
                     img.thumbnail((self.thumb_size, self.thumb_size), method)
-                    temp = dest.with_suffix('.tmp.jpg')
-                    img.save(temp, format='JPEG', quality=88, optimize=True)
+                    temp = dest.with_suffix(".tmp.jpg")
+                    img.save(temp, format="JPEG", quality=88, optimize=True)
                     temp.replace(dest)
-                    os.utime(dest, (source_stat.st_mtime, source_stat.st_mtime), follow_symlinks=False)
+                    os.utime(
+                        dest,
+                        (source_stat.st_mtime, source_stat.st_mtime),
+                        follow_symlinks=False,
+                    )
             except Exception:  # pragma: no cover - thumbnail generation best-effort
                 LOGGER.exception("Failed to create thumbnail for %s", source)
                 return None
@@ -1147,10 +1333,12 @@ def create_http_server(
     db: LocalBooruDatabase,
     scanner: Scanner,
     progress: ClipProgress,
-    clip_indexer: Optional[ClipIndexer],
-    auto_progress: Optional[AutoTagProgress],
-    auto_indexer: Optional[AutoTagIndexer],
-) -> "LocalBooruHTTPServer":
+    clip_indexer: Optional[ClipIndexer] = None,
+    auto_progress: Optional[AutoTagProgress] = None,
+    auto_indexer: Optional[AutoTagIndexer] = None,
+    rating_progress: Optional[RatingProgress] = None,
+    rating_indexer: Optional[RatingIndexer] = None,
+) -> LocalBooruHTTPServer:
     return LocalBooruHTTPServer(
         (config.host, config.port),
         config=config,
@@ -1160,4 +1348,6 @@ def create_http_server(
         clip_indexer=clip_indexer,
         auto_progress=auto_progress,
         auto_indexer=auto_indexer,
+        rating_progress=rating_progress,
+        rating_indexer=rating_indexer,
     )
