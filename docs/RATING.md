@@ -41,9 +41,8 @@ Ratings behave like tags:
 
 No special syntax—leverages existing `search.py` (build_matched_cte, collect_tag_facets).
 
-### UI Elements
+- ### UI Elements
 - **Gallery Sidebar**:
-  - **Rating Status Section**: Below auto-tagger; shows progress bar, summary (e.g., "Processing 2/500 | ETA 3min"), current file, errors list. Polls `/api/rating_status` every 2s.
 - **Rating Filter Card**: Checkboxes for each class (default: check General/Sensitive/Questionable, uncheck Explicit). Each pill displays a live count (fed by `/api/rating_counts`) so the numbers refresh as new items are scanned or tagged. Toggling automatically injects or removes `-rating:{class}` exclusions.
 - Status chips in the detail pane include a "Rating" entry that tracks queue position and readiness alongside CLIP and auto-tag states.
 

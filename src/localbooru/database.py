@@ -352,22 +352,21 @@ class LocalBooruDatabase:
             )
 
     def clip_progress_counts(self, model: str) -> Tuple[int, int, int, int]:
-        with self._connection:
-            row = self._connection.execute(
-                "SELECT "
-                "COUNT(*) AS total, "
-                "SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END) AS completed, "
-                "SUM(CASE WHEN status IN ('pending', 'processing') THEN 1 ELSE 0 END) AS processing, "
-                "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
-                "FROM clip_embeddings WHERE model=?",
-                (model,),
-            ).fetchone()
-            return (
-                row["total"] or 0,
-                row["completed"] or 0,
-                row["processing"] or 0,
-                row["errors"] or 0,
-            )
+        row = self._connection.execute(
+            "SELECT "
+            "COUNT(*) AS total, "
+            "SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END) AS completed, "
+            "SUM(CASE WHEN status IN ('pending', 'processing') THEN 1 ELSE 0 END) AS processing, "
+            "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
+            "FROM clip_embeddings WHERE model=?",
+            (model,),
+        ).fetchone()
+        return (
+            row["total"] or 0,
+            row["completed"] or 0,
+            row["processing"] or 0,
+            row["errors"] or 0,
+        )
 
     def iter_clip_vectors(self, model: str) -> Iterator[Tuple[int, bytes]]:
         for row in self._connection.execute(

@@ -16,10 +16,6 @@ const autoStatusSection = document.getElementById("auto-status");
 const autoSummary = document.getElementById("auto-summary");
 const autoErrorsList = document.getElementById("auto-errors");
 const autoProgressBar = document.getElementById("auto-progress-bar");
-const ratingStatusSection = document.getElementById("rating-status");
-const ratingSummary = document.getElementById("rating-summary");
-const ratingProgressBar = document.getElementById("rating-progress-bar");
-const ratingErrorsList = document.getElementById("rating-errors");
 const ratingCardEl = document.getElementById("rating-card");
 const ratingFilterInputs = ratingCardEl
   ? Array.from(
@@ -3315,85 +3311,6 @@ async function pollAutoStatus() {
   }
 }
 
-async function pollRatingStatus() {
-  if (!ratingStatusSection) {
-    return;
-  }
-
-  try {
-    const response = await fetch("/api/rating_status");
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const data = await response.json();
-
-    if (data.enabled === false) {
-      ratingStatusSection.style.display = "none";
-      if (ratingCardEl) {
-        ratingCardEl.style.display = "none";
-      }
-      if (ratingProgressBar) {
-        ratingProgressBar.style.width = "0%";
-        ratingProgressBar.dataset.label = "0%";
-      }
-      requestAnimationFrame(updateStatusCardHeight);
-      return;
-    }
-
-    ratingStatusSection.style.display = "";
-    if (ratingCardEl) {
-      ratingCardEl.style.display = "";
-    }
-    const { total, tagged, untagged, state, counts } = data;
-    const progressPercent = total > 0 ? Math.round((tagged / total) * 100) : 0;
-    const summaryParts = [];
-    if (total > 0) {
-      summaryParts.push(`${tagged}/${total} tagged (${progressPercent}%)`);
-    }
-    if (untagged > 0) {
-      summaryParts.push(`${untagged} untagged`);
-    }
-    if (counts && typeof counts === "object") {
-      const countSummary = RATING_CLASSES.map((key) => {
-        const name = RATING_DISPLAY_NAMES[key] || key;
-        const value = Number.isFinite(counts[key]) ? Number(counts[key]) : 0;
-        return `${name}: ${value}`;
-      }).join(" | ");
-      summaryParts.push(countSummary);
-    }
-    ratingSummary.textContent = summaryParts.join(" • ") || "No rating data yet";
-
-    if (ratingProgressBar) {
-      ratingProgressBar.style.width = `${progressPercent}%`;
-      ratingProgressBar.dataset.label = `${progressPercent}%`;
-    }
-
-    ratingErrorsList.style.display = "none";
-    ratingErrorsList.innerHTML = "";
-
-    if (state === "complete") {
-      ratingStatusSection.classList.add("complete");
-    } else {
-      ratingStatusSection.classList.remove("complete");
-    }
-
-    if (counts && typeof counts === "object") {
-      updateRatingFilterCounts(counts);
-    }
-    requestAnimationFrame(updateStatusCardHeight);
-  } catch (error) {
-    console.error("Failed to fetch rating status:", error);
-    ratingSummary.textContent = "Rating status unavailable";
-    if (ratingProgressBar) {
-      ratingProgressBar.style.width = "0%";
-      ratingProgressBar.dataset.label = "0%";
-    }
-    ratingErrorsList.style.display = "none";
-    ratingErrorsList.innerHTML = "";
-    requestAnimationFrame(updateStatusCardHeight);
-  }
-}
-
 async function pollRatingCounts() {
   if (!ratingFilterMeta.length) {
     return;
@@ -3430,10 +3347,8 @@ if (clipToggleBtn) {
 setInterval(() => {
   pollClipStatus();
   pollAutoStatus();
-  pollRatingStatus();
   pollRatingCounts();
 }, 2000);
 pollClipStatus();
 pollAutoStatus();
-pollRatingStatus();
 pollRatingCounts();
