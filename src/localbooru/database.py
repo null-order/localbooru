@@ -345,11 +345,15 @@ class LocalBooruDatabase:
 
     def store_clip_vector(self, image_id: int, model: str, vector: bytes) -> None:
         now = time.time()
-        with self._connection:
-            self._connection.execute(
-                "UPDATE clip_embeddings SET status='ready', model=?, vector=?, updated_at=? WHERE image_id=?",
-                (model, vector, now, image_id),
-            )
+        conn = self.new_connection()
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE clip_embeddings SET status='ready', model=?, vector=?, updated_at=? WHERE image_id=?",
+                    (model, vector, now, image_id),
+                )
+        finally:
+            conn.close()
 
     def clip_progress_counts(self, model: str) -> Tuple[int, int, int, int]:
         row = self._connection.execute(
