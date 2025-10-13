@@ -15,6 +15,10 @@ def tokens_from_query(query: str) -> List[QueryToken]:
     return parse_query_tokens(query)
 
 
+def _fts_quote(term: str) -> str:
+    return '"' + term.replace('"', '""') + '"'
+
+
 def build_matched_cte(tokens: Sequence[QueryToken]) -> Tuple[str, List[str]]:
     positives = [t for t in tokens if not t[2]]
     negatives = [t for t in tokens if t[2]]
@@ -22,7 +26,7 @@ def build_matched_cte(tokens: Sequence[QueryToken]) -> Tuple[str, List[str]]:
     positive_clauses: List[str] = []
     positive_params: List[str] = []
     for norm, kind, _ in positives:
-        match = f"norm:{norm}"
+        match = f"norm:{_fts_quote(norm)}"
         if kind == "any":
             positive_clauses.append(
                 "SELECT DISTINCT CAST(image_id AS INTEGER) FROM tag_index WHERE kind IN ('prompt','character') AND tag_index MATCH ?"
@@ -37,7 +41,7 @@ def build_matched_cte(tokens: Sequence[QueryToken]) -> Tuple[str, List[str]]:
     negative_clauses: List[str] = []
     negative_params: List[str] = []
     for norm, kind, _ in negatives:
-        match = f"norm:{norm}"
+        match = f"norm:{_fts_quote(norm)}"
         if kind == "any":
             negative_clauses.append(
                 "SELECT DISTINCT CAST(image_id AS INTEGER) FROM tag_index WHERE kind IN ('prompt','character') AND tag_index MATCH ?"
