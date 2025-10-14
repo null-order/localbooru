@@ -278,7 +278,7 @@ def scan_pngs(
     *,
     progress: Optional["ScanProgress"] = None,
 ) -> None:
-    roots = [config.root, *config.extra_roots]
+    roots = list(config.roots)
     all_candidates: list[Path] = []
     seen_candidates: set[str] = set()
     observed_paths: set[str] = set()

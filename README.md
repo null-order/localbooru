@@ -25,9 +25,61 @@ python -m localbooru.cli --clip-only --db /tmp/localbooru.db
 
 Launching without `--no-ui` now opens the gallery in your default browser. Opt back into the embedded shell with `--webview` (install via `pip install localbooru[ui]` if you want that route). CLIP indexing requires the optional extras (`pip install localbooru[clip]`).
 
+### Configuration files & service mode
+
+Point the CLI at a JSON/TOML/YAML configuration file with `--config` (or the `LOCALBOORU_CONFIG` environment variable) to pin down long-lived installs. When no explicit path is provided, LocalBooru automatically looks for `~/.localbooru.toml` (unless you opt into `--cwd` legacy mode). Example TOML:
+
+```toml
+roots = [
+  "/mnt/library/novelai",
+  "/mnt/library/reference",
+]
+watch = true      # enable background rescans
+service = true    # skip UI launch and favour watch mode defaults
+```
+
+The first entry in `roots` becomes the primary ingest root; the rest are treated as additional libraries. `extra_roots` can be supplied alongside the list if you prefer to keep the old split.
+
+When a config file is present and no explicit database path is provided, LocalBooru now stores metadata under `${XDG_STATE_HOME:-~/.local/state}/localbooru/gallery.db`. Thumbnails continue to live under `${XDG_CACHE_HOME:-~/.cache}/localbooru/thumbs`.
+
+Print a fully annotated template with:
+
+```bash
+python -m localbooru.cli --print-config
+```
+
+Start a headless service with:
+
+```bash
+python -m localbooru.cli --config ~/.config/localbooru.toml --service
+```
+
+Install the optional watcher extra (`pip install localbooru[watch]`) to switch watch mode over to the `watchdog`/inotify backend. When the dependency is unavailable, the timer-based rescans from earlier releases remain in place. Use `--cwd` to stick with the original cwd-relative defaults and skip automatic config discovery.
+
+### Full environment setup
+
+LocalBooru offers the best experience when all optional extras are installed:
+
+- `[clip]` provides OpenCLIP embedding support (torch + open_clip_torch)
+- `[ui]` enables the optional desktop webview
+- `[tagging]` adds WD14 auto-tagging
+- `[watch]` swaps interval rescans for watchdog/inotify monitoring
+
+Bootstrap everything in one go with the helper script (defaults to `.venv` in the repo root):
+
+```bash
+scripts/setup_venv.sh
+source .venv/bin/activate
+python -m localbooru.cli --config ~/.localbooru.toml
+```
+
+Pass a custom path (`scripts/setup_venv.sh --venv ~/localbooru-env`) or override the interpreter (`PYTHON=python3.11 scripts/setup_venv.sh`) when needed. The script installs LocalBooru in editable mode with all extras so development and full functionality share the same environment. CPU wheels are installed by default; pick another backend with `--backend cuda|rocm|mps` (set `CUDA_VERSION` or `ROCM_VERSION` to target a specific wheel tag).
+
+The helper installs CLIP, UI, watchdog, and WD14 tagging support (using `dghs-imgutils`, or `dghs-imgutils[gpu]` for CUDA/ROCm). If you build environments manually, install the matching `dghs-imgutils` wheel yourself to enable auto-tagging.
+
 ### Automatic tagging for unlabeled images
 
-Install the WD14 helpers (`pip install localbooru[tagging]`) to let the bundled WD14 queue run by default. Auto-tagging now starts in augment + background mode out of the box; tweak it via:
+Install the WD14 helpers (`pip install dghs-imgutils`, or `dghs-imgutils[gpu]` when running a CUDA/ROCm torch build) to let the bundled WD14 queue run by default. Auto-tagging now starts in augment + background mode out of the box; tweak it via:
 
 - `--no-auto-tag` to opt out entirely, or `--auto-tag-mode missing` to only fill empty metadata slots.
 - `--no-auto-tag-background` to run synchronously during ingestion (`--auto-tag-batch-size` still applies when backgrounded).

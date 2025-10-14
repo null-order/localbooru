@@ -114,9 +114,11 @@ class Scanner(threading.Thread):
         self.scan_progress = scan_progress or ScanProgress()
         self._stop_event = threading.Event()
         self._initial_run_complete = False
+        self._rescan_event = threading.Event()
 
     def run_once(self) -> None:
-        LOGGER.info("Running filesystem scan for %s", self.config.root)
+        roots_display = ", ".join(str(path) for path in self.config.roots)
+        LOGGER.info("Running filesystem scan for %s", roots_display)
         scan_pngs(self.db, self.config, progress=self.scan_progress)
         LOGGER.info(
             "Scan complete (%d processed, %d errors)",
@@ -126,18 +128,35 @@ class Scanner(threading.Thread):
         self._initial_run_complete = True
 
     def run(self) -> None:  # pragma: no cover - background thread
+        skip_initial_run = self._initial_run_complete
         while not self._stop_event.is_set():
-            if self._initial_run_complete:
-                if not self.config.watch:
-                    break
-                if self._stop_event.wait(self.config.rescan_interval):
-                    break
-            self.run_once()
-            if not self.config.watch:
+            if skip_initial_run:
+                skip_initial_run = False
+            else:
+                self._rescan_event.clear()
+                self.run_once()
+            if not self.config.watch or self._stop_event.is_set():
                 break
+            while not self._stop_event.is_set():
+                if self.config.rescan_interval and self.config.rescan_interval > 0:
+                    triggered = self._rescan_event.wait(self.config.rescan_interval)
+                else:
+                    triggered = self._rescan_event.wait()
+                if self._stop_event.is_set():
+                    return
+                if triggered:
+                    self._rescan_event.clear()
+                    break
+                if self.config.rescan_interval and self.config.rescan_interval > 0:
+                    break
+
+    def trigger_scan(self) -> None:
+        """Request that the scanner perform another pass soon."""
+        self._rescan_event.set()
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._rescan_event.set()
 
     def join(self, timeout: Optional[float] = None) -> None:
         super().join(timeout)

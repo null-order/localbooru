@@ -11,6 +11,8 @@ from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tupl
 
 from .tags import TagRecord
 
+BUSY_TIMEOUT_MS = 5000
+
 SCHEMA_STATEMENTS = [
     "PRAGMA journal_mode=WAL;",
     "PRAGMA synchronous=NORMAL;",
@@ -118,9 +120,20 @@ class LocalBooruDatabase:
         return self._connection.cursor()
 
     def new_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
+        conn = sqlite3.connect(
+            self.path,
+            check_same_thread=False,
+            timeout=max(BUSY_TIMEOUT_MS / 1000.0, 5.0),
+        )
+        self._configure_connection(conn)
         return conn
+
+    def _configure_connection(self, conn: sqlite3.Connection) -> None:
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_MS)}")
+        except sqlite3.Error:
+            pass
 
     def _ensure_schema(self) -> None:
         with closing(self._connection.cursor()) as cur:
@@ -280,13 +293,23 @@ class LocalBooruDatabase:
 
     def delete_missing_images(self, existing_paths: Iterable[str]) -> int:
         existing = list(existing_paths)
-        placeholder = ",".join("?" for _ in existing)
-        if not placeholder:
+        if not existing:
             return 0
-        sql = f"DELETE FROM images WHERE path NOT IN ({placeholder})"
         with self._connection:
-            cur = self._connection.execute(sql, tuple(existing))
-            return cur.rowcount
+            self._connection.execute(
+                "CREATE TEMP TABLE IF NOT EXISTS temp_keep_paths(path TEXT PRIMARY KEY)"
+            )
+            self._connection.execute("DELETE FROM temp_keep_paths")
+            self._connection.executemany(
+                "INSERT OR IGNORE INTO temp_keep_paths(path) VALUES (?)",
+                ((path,) for path in existing),
+            )
+            cur = self._connection.execute(
+                "DELETE FROM images WHERE path NOT IN (SELECT path FROM temp_keep_paths)"
+            )
+            deleted = cur.rowcount
+            self._connection.execute("DELETE FROM temp_keep_paths")
+            return deleted
 
     # --- CLIP embedding operations ------------------------------------------------------
 
@@ -347,30 +370,48 @@ class LocalBooruDatabase:
         now = time.time()
         conn = self.new_connection()
         try:
-            with conn:
-                conn.execute(
-                    "UPDATE clip_embeddings SET status='ready', model=?, vector=?, updated_at=? WHERE image_id=?",
-                    (model, vector, now, image_id),
-                )
+            attempts = 0
+            while True:
+                try:
+                    with conn:
+                        conn.execute(
+                            "UPDATE clip_embeddings SET status='ready', model=?, vector=?, updated_at=? WHERE image_id=?",
+                            (model, vector, now, image_id),
+                        )
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" in str(exc).lower() and attempts < 4:
+                        attempts += 1
+                        time.sleep(0.2 * attempts)
+                        continue
+                    raise
         finally:
             conn.close()
 
     def clip_progress_counts(self, model: str) -> Tuple[int, int, int, int]:
-        row = self._connection.execute(
-            "SELECT "
-            "COUNT(*) AS total, "
-            "SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END) AS completed, "
-            "SUM(CASE WHEN status IN ('pending', 'processing') THEN 1 ELSE 0 END) AS processing, "
-            "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
-            "FROM clip_embeddings WHERE model=?",
-            (model,),
-        ).fetchone()
-        return (
-            row["total"] or 0,
-            row["completed"] or 0,
-            row["processing"] or 0,
-            row["errors"] or 0,
-        )
+        model_value = "" if not model else str(model)
+        conn = self.new_connection()
+        try:
+            cur = conn.execute(
+                "SELECT "
+                "COUNT(*) AS total, "
+                "SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END) AS completed, "
+                "SUM(CASE WHEN status IN ('pending', 'processing') THEN 1 ELSE 0 END) AS processing, "
+                "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
+                "FROM clip_embeddings WHERE model=?",
+                (model_value,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return (0, 0, 0, 0)
+            return (
+                int(row["total"] or 0),
+                int(row["completed"] or 0),
+                int(row["processing"] or 0),
+                int(row["errors"] or 0),
+            )
+        finally:
+            conn.close()
 
     def iter_clip_vectors(self, model: str) -> Iterator[Tuple[int, bytes]]:
         for row in self._connection.execute(
@@ -445,16 +486,32 @@ class LocalBooruDatabase:
                 if not rows:
                     return []
                 now = time.time()
-                conn.executemany(
-                    "UPDATE auto_tag_jobs SET status='processing', updated_at=? WHERE image_id=?",
-                    ((now, row["image_id"]) for row in rows),
-                )
+                attempts = 0
+                update_params = [(now, row["image_id"]) for row in rows]
+                while True:
+                    try:
+                        conn.executemany(
+                            "UPDATE auto_tag_jobs SET status='processing', updated_at=? WHERE image_id=?",
+                            update_params,
+                        )
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if "locked" in str(exc).lower() and attempts < 4:
+                            attempts += 1
+                            time.sleep(0.2 * attempts)
+                            continue
+                        raise
                 return rows
         finally:
             conn.close()
 
     def _execute_auto_job_update(self, sql: str, params: Tuple) -> None:
-        self._connection.execute(sql, params)
+        conn = self.new_connection()
+        try:
+            with conn:
+                conn.execute(sql, params)
+        finally:
+            conn.close()
 
     def mark_auto_tag_ready(self, image_id: int) -> None:
         now = time.time()
@@ -465,14 +522,14 @@ class LocalBooruDatabase:
 
     def mark_auto_tag_skipped(self, image_id: int) -> None:
         now = time.time()
-        self._connection.execute(
+        self._execute_auto_job_update(
             "UPDATE auto_tag_jobs SET status='skipped', updated_at=? WHERE image_id=?",
             (now, image_id),
         )
 
     def mark_auto_tag_error(self, image_id: int, error: str) -> None:
         now = time.time()
-        self._connection.execute(
+        self._execute_auto_job_update(
             "UPDATE auto_tag_jobs SET status='error', error=?, updated_at=? WHERE image_id=?",
             (error, now, image_id),
         )
@@ -484,65 +541,80 @@ class LocalBooruDatabase:
         strategy: str,
         rating_scores: Optional[Dict[str, float]] = None,
     ) -> str:
-        result = "skipped"
-        with self._connection:
-            row = self._connection.execute(
-                "SELECT path FROM images WHERE id=?",
-                (image_id,),
-            ).fetchone()
-            if not row:
-                return "missing"
-
-            existing_tags = {
-                (tag["norm"], tag["kind"])
-                for tag in self._connection.execute(
-                    "SELECT norm, kind FROM tags WHERE image_id=?",
-                    (image_id,),
+        conn = self.new_connection()
+        try:
+            with conn:
+                result = self._apply_auto_tags_internal(
+                    conn, image_id, tags, strategy
                 )
-            }
+                normalized_scores = self._normalize_scores(rating_scores)
+                if normalized_scores:
+                    self._apply_rating_scores_internal(
+                        conn, image_id, normalized_scores
+                    )
+            return result
+        finally:
+            conn.close()
 
-            if strategy == "missing":
-                # Only add tags not already present (by norm+kind)
-                to_add = [
-                    tag
-                    for tag in tags
-                    if (tag.norm, tag.kind) not in existing_tags and tag.weight >= 0.0
-                ]
-                if not to_add:
-                    return "skipped"
-            else:  # "augment"
-                to_add = [tag for tag in tags if tag.weight >= 0.0]
+    def _apply_auto_tags_internal(
+        self,
+        conn: sqlite3.Connection,
+        image_id: int,
+        tags: Sequence[TagRecord],
+        strategy: str,
+    ) -> str:
+        row = conn.execute(
+            "SELECT path FROM images WHERE id=?",
+            (image_id,),
+        ).fetchone()
+        if not row:
+            return "missing"
 
+        existing_rows = conn.execute(
+            "SELECT norm, kind FROM tags WHERE image_id=?",
+            (image_id,),
+        ).fetchall()
+        existing_tags = {
+            (row["norm"], row["kind"])
+            for row in existing_rows
+        }
+
+        if strategy == "missing":
+            to_add = [
+                tag
+                for tag in tags
+                if (tag.norm, tag.kind) not in existing_tags and tag.weight >= 0.0
+            ]
             if not to_add:
                 return "skipped"
+        else:
+            to_add = [tag for tag in tags if tag.weight >= 0.0]
 
-            # Insert new tags
-            for tag in to_add:
-                self._connection.execute(
-                    "INSERT INTO tags "
-                    "(image_id, tag, norm, kind, emphasis, weight, raw, source) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        image_id,
-                        tag.tag,
-                        tag.norm,
-                        tag.kind,
-                        tag.emphasis,
-                        tag.weight,
-                        tag.raw,
-                        "auto",
-                    ),
-                )
-            result = "applied"
+        if not to_add:
+            return "skipped"
 
-        if rating_scores:
-            self.update_rating_from_scores(image_id, rating_scores)
-
-        return result
+        for tag in to_add:
+            conn.execute(
+                "INSERT INTO tags "
+                "(image_id, tag, norm, kind, emphasis, weight, raw, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    image_id,
+                    tag.tag,
+                    tag.norm,
+                    tag.kind,
+                    tag.emphasis,
+                    tag.weight,
+                    tag.raw,
+                    "auto",
+                ),
+            )
+        return "applied"
 
     def auto_tag_progress_counts(self) -> Tuple[int, int, int, int]:
-        with self._connection:
-            row = self._connection.execute(
+        conn = self.new_connection()
+        try:
+            cur = conn.execute(
                 "SELECT "
                 "COUNT(*) AS total, "
                 "SUM(CASE WHEN status='ready' THEN 1 ELSE 0 END) AS completed, "
@@ -550,13 +622,18 @@ class LocalBooruDatabase:
                 "SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors "
                 "FROM auto_tag_jobs",
                 (),
-            ).fetchone()
-            return (
-                row["total"] or 0,
-                row["completed"] or 0,
-                row["processing"] or 0,
-                row["errors"] or 0,
             )
+            row = cur.fetchone()
+            if row is None:
+                return (0, 0, 0, 0)
+            return (
+                int(row["total"] or 0),
+                int(row["completed"] or 0),
+                int(row["processing"] or 0),
+                int(row["errors"] or 0),
+            )
+        finally:
+            conn.close()
 
     def rating_counts(self) -> Dict[str, int]:
         rows = self._connection.execute(
@@ -577,38 +654,58 @@ class LocalBooruDatabase:
         *,
         model: str = "wd14",
     ) -> None:
-        if not scores:
-            return
-        normalized = {
-            str(label).lower(): float(value)
-            for label, value in scores.items()
-            if isinstance(value, (int, float))
-        }
+        normalized = self._normalize_scores(scores)
         if not normalized:
             return
-        best_label, best_score = max(normalized.items(), key=lambda item: item[1])
+        conn = self.new_connection()
+        try:
+            with conn:
+                self._apply_rating_scores_internal(conn, image_id, normalized, model=model)
+        finally:
+            conn.close()
+
+    def _apply_rating_scores_internal(
+        self,
+        conn: sqlite3.Connection,
+        image_id: int,
+        scores: Dict[str, float],
+        *,
+        model: str = "wd14",
+    ) -> None:
+        if not scores:
+            return
+        best_label, best_score = max(scores.items(), key=lambda item: item[1])
         now = time.time()
-        scores_json = json.dumps(normalized, sort_keys=True)
-        with self._connection:
-            self._connection.execute(
-                "UPDATE images SET rating=?, rating_confidence=?, rating_updated=? WHERE id=?",
-                (best_label, best_score, now, image_id),
-            )
-            self._connection.execute(
-                """
-                INSERT INTO rating_jobs(image_id, status, model, rating, confidence, scores_json, error, queued_at, updated_at)
-                VALUES (?, 'ready', ?, ?, ?, ?, NULL, ?, ?)
-                ON CONFLICT(image_id) DO UPDATE SET
-                    status=excluded.status,
-                    model=excluded.model,
-                    rating=excluded.rating,
-                    confidence=excluded.confidence,
-                    scores_json=excluded.scores_json,
-                    error=NULL,
-                    updated_at=excluded.updated_at
-                """,
-                (image_id, model, best_label, best_score, scores_json, now, now),
-            )
+        scores_json = json.dumps(scores, sort_keys=True)
+        conn.execute(
+            "UPDATE images SET rating=?, rating_confidence=?, rating_updated=? WHERE id=?",
+            (best_label, best_score, now, image_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO rating_jobs(image_id, status, model, rating, confidence, scores_json, error, queued_at, updated_at)
+            VALUES (?, 'ready', ?, ?, ?, ?, NULL, ?, ?)
+            ON CONFLICT(image_id) DO UPDATE SET
+                status=excluded.status,
+                model=excluded.model,
+                rating=excluded.rating,
+                confidence=excluded.confidence,
+                scores_json=excluded.scores_json,
+                error=NULL,
+                updated_at=excluded.updated_at
+            """,
+            (image_id, model, best_label, best_score, scores_json, now, now),
+        )
+
+    @staticmethod
+    def _normalize_scores(scores: Optional[Dict[str, float]]) -> Dict[str, float]:
+        if not scores:
+            return {}
+        normalized: Dict[str, float] = {}
+        for label, value in scores.items():
+            if isinstance(value, (int, float)):
+                normalized[str(label).lower()] = float(value)
+        return normalized
 
     def store_rating(
         self,

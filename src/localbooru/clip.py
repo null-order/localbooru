@@ -48,7 +48,7 @@ class ClipProgress:
 
     def snapshot(self, db: Optional[LocalBooruDatabase] = None) -> Dict[str, object]:
         data = asdict(self)
-        if db is not None:
+        if db is not None and self.model_key:
             total, completed, processing, errors = db.clip_progress_counts(self.model_key)
             effective_total = max(total - errors, 0)
             data.update(
@@ -183,6 +183,16 @@ class ClipIndexer(threading.Thread):
             model = self._get_model()
             vectors = model.compute_image_features(images)
         except Exception as exc:
+            if isinstance(exc, RuntimeError) and "torchvision" in str(exc):
+                LOGGER.error(
+                    "torchvision is not available; disabling CLIP indexing until the dependency is installed."
+                )
+                self.config.clip_enabled = False
+                for image_id in image_ids:
+                    self.db.mark_clip_error(image_id, "torchvision missing")
+                self._record_error("torchvision missing")
+                self._refresh_progress()
+                return False
             LOGGER.exception("Failed to compute CLIP vectors: %s", exc)
             for image_id in image_ids:
                 self.db.mark_clip_error(image_id, "model failure")
@@ -259,9 +269,23 @@ class _OpenClipModel:
 
     def __init__(self, model_name: str, checkpoint: str, device: str):
         try:
+            import torchvision  # noqa: F401  # ensure dependency present
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "torchvision is required for CLIP indexing; install it via "
+                "`pip install torchvision` (match the torch build if using CUDA/ROCm)."
+            ) from exc
+        try:
             import open_clip
-        except ImportError as exc:  # pragma: no cover - optional dependency
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
             raise RuntimeError("open_clip_torch is required for CLIP indexing") from exc
+        except KeyError as exc:  # pragma: no cover - dependency resolution edge case
+            if exc.args and exc.args[0] == "torchvision":
+                raise RuntimeError(
+                    "torchvision failed to import; install it via "
+                    "`pip install torchvision` (match the torch build if using CUDA/ROCm)."
+                ) from exc
+            raise
 
         self._device = device
         self._model, _, self._preprocess = open_clip.create_model_and_transforms(

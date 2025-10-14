@@ -13,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import threading
+import time
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -279,6 +280,12 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/clip/resume":
             self._handle_clip_control("resume")
             return
+        if parsed.path == "/api/auto/pause":
+            self._handle_auto_control("pause")
+            return
+        if parsed.path == "/api/auto/resume":
+            self._handle_auto_control("resume")
+            return
         if parsed.path == "/api/search/clip":
             self._handle_clip_search()
             return
@@ -313,10 +320,11 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             self._send_json(auto_progress.snapshot(db))
 
     def _handle_rating_status(self) -> None:
-        LOGGER.debug("GET /api/rating_status")
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug("GET /api/rating_status")
         db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
         total = db.connection.execute("SELECT COUNT(*) FROM images").fetchone()[0]
-        counts = db.rating_counts()
+        counts = self._cached_rating_counts(db)
         tagged = sum(counts.values())
         untagged = max(total - tagged, 0)
         payload = {
@@ -330,11 +338,28 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         self._send_json(payload)
 
     def _handle_rating_counts(self) -> None:
-        LOGGER.debug("GET /api/rating_counts")
+        if LOGGER.isEnabledFor(logging.DEBUG):
+            LOGGER.debug("GET /api/rating_counts")
         db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
-        counts = db.rating_counts()
+        counts = self._cached_rating_counts(db)
         payload = {label: int(counts.get(label, 0)) for label in RATING_CLASSES}
         self._send_json({"counts": payload})
+
+    def _cached_rating_counts(self, db: LocalBooruDatabase) -> Dict[str, int]:
+        cache = getattr(self.server, "_rating_counts_cache", None)
+        now = time.time()
+        ttl = 5.0
+        if (
+            not isinstance(cache, dict)
+            or (now - cache.get("timestamp", 0)) > ttl
+        ):
+            counts = db.rating_counts()
+            cache = {"timestamp": now, "counts": counts}
+            setattr(self.server, "_rating_counts_cache", cache)
+        cached_counts = cache.get("counts", {})
+        if not isinstance(cached_counts, dict):
+            return {}
+        return dict(cached_counts)
 
     def _serve_index(self) -> None:
         index_file = Path(__file__).resolve().parent / "frontend" / "index.html"
@@ -780,6 +805,18 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.NO_CONTENT)
         self.end_headers()
 
+    def _handle_auto_control(self, action: str) -> None:
+        auto_indexer: Optional[AutoTagIndexer] = self.server.auto_indexer  # type: ignore[attr-defined]
+        if auto_indexer is None:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Auto-tagging disabled")
+            return
+        if action == "pause":
+            auto_indexer.pause()
+        elif action == "resume":
+            auto_indexer.resume()
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.end_headers()
+
     def _handle_clip_search(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0:
@@ -1165,7 +1202,8 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         self, format: str, *args
     ) -> None:  # pragma: no cover - adjust logging
         message = format % args
-        if "/api/status/" in message:
+        low_traffic_paths = ("/api/status/", "/api/rating_counts", "/api/rating_status")
+        if any(path in message for path in low_traffic_paths):
             LOGGER.debug("%s - %s", self.address_string(), message)
         else:
             LOGGER.info("%s - %s", self.address_string(), message)

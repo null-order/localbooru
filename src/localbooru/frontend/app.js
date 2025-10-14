@@ -16,6 +16,7 @@ const autoStatusSection = document.getElementById("auto-status");
 const autoSummary = document.getElementById("auto-summary");
 const autoErrorsList = document.getElementById("auto-errors");
 const autoProgressBar = document.getElementById("auto-progress-bar");
+const autoToggleBtn = document.getElementById("auto-toggle");
 const ratingCardEl = document.getElementById("rating-card");
 const ratingFilterInputs = ratingCardEl
   ? Array.from(
@@ -128,6 +129,80 @@ let sidebarVisible = desktopMediaQuery.matches;
 let statusCardVisible = true;
 
 updateRatingFilterCounts();
+
+const clipProgressHistory = [];
+const autoProgressHistory = [];
+
+function formatEtaLabel(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const totalSeconds = Math.max(0, Math.round(value));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes.toString().padStart(2, "0")}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${secs.toString().padStart(2, "0")}s`;
+  }
+  return `${secs}s`;
+}
+
+function buildRateSummary(rate, etaSeconds) {
+  const value = Number(rate);
+  let rateLabel = "—";
+  if (Number.isFinite(value) && value > 0) {
+    rateLabel = value >= 1 ? `${value.toFixed(1)}/min` : `${value.toFixed(2)}/min`;
+  }
+  let summary = `Rate: ${rateLabel}`;
+  const etaLabel = formatEtaLabel(etaSeconds);
+  if (etaLabel) {
+    summary += ` [ETA ${etaLabel}]`;
+  }
+  return summary;
+}
+
+function updateStatusToggleButton(button, { state, icon, label, hidden, disabled }) {
+  if (!button) return;
+  if (typeof hidden === "boolean") button.hidden = hidden;
+  if (typeof disabled === "boolean") button.disabled = disabled;
+  if (state) button.dataset.state = state;
+  const iconEl = button.querySelector(".status-icon");
+  if (iconEl && icon) iconEl.textContent = icon;
+  const labelEl = button.querySelector(".status-toggle-label");
+  if (labelEl && label) labelEl.textContent = label;
+  if (label) button.setAttribute("aria-label", label);
+}
+
+function pushProgress(history, completed, total) {
+  const now = Date.now();
+  history.push({ time: now, completed, total });
+  if (history.length > 20) history.shift();
+}
+
+function averageRatePerMinute(history) {
+  if (!history || history.length < 2) return 0;
+  const rates = [];
+  for (let i = 1; i < history.length; i += 1) {
+    const prev = history[i - 1];
+    const curr = history[i];
+    const deltaCompleted = Number(curr.completed) - Number(prev.completed);
+    const deltaTime = Number(curr.time) - Number(prev.time);
+    if (deltaCompleted > 0 && deltaTime > 500) {
+      rates.push((deltaCompleted / deltaTime) * 60000);
+    }
+  }
+  if (!rates.length) return 0;
+  const sum = rates.reduce((acc, value) => acc + value, 0);
+  return sum / rates.length;
+}
+
+function computeEtaSeconds(remaining, ratePerMin) {
+  if (!Number.isFinite(ratePerMin) || ratePerMin <= 0) return null;
+  if (!Number.isFinite(remaining) || remaining <= 0) return null;
+  return (remaining / ratePerMin) * 60;
+}
 
 function getActiveClipToken() {
   if (!clipModeActive) {
@@ -2492,8 +2567,11 @@ async function openDetail(id, options = {}) {
             `;
     const tagList = Array.isArray(data.tags) ? data.tags : [];
     updateDetailRating(data.rating || null);
-    renderDetailTags(tagList);
-    renderCharacterDetails(data.characters || []);
+    const characterDetails = Array.isArray(data.characters)
+      ? data.characters
+      : [];
+    renderDetailTags(tagList, characterDetails);
+    renderCharacterDetails(characterDetails);
     updateCopyButtons({
       positivePrompt: currentPrompts.positive,
       tags: tagList,
@@ -2646,10 +2724,12 @@ function updateDetailRating(ratingData) {
   }
 }
 
-function renderDetailTags(tags) {
+function renderDetailTags(tags, characterDetails) {
   detailTags.innerHTML = "";
   detailNegTags.innerHTML = "";
   let hasNeg = false;
+  const hasCharacterDetails =
+    Array.isArray(characterDetails) && characterDetails.length > 0;
   tags.forEach((tag) => {
     const span = document.createElement("span");
     span.className = "tag-pill";
@@ -2684,8 +2764,8 @@ function renderDetailTags(tags) {
     if (tag.kind === "negative") {
       hasNeg = true;
       detailNegTags.appendChild(span);
-    } else if (tag.kind === "character") {
-      // render via character section
+    } else if (tag.kind === "character" && hasCharacterDetails) {
+      // Character metadata will render separately; avoid duplicates.
       return;
     } else if (tag.kind === "rating") {
       return;
@@ -3162,20 +3242,47 @@ async function pollClipStatus() {
     if (detailSimilarBtn && Number.isFinite(currentDetailId))
       detailSimilarBtn.disabled = false;
 
-    const total = Number(data.total) || 0;
-    const completed = Number(data.completed) || 0;
-    const processing = Number(data.processing) || 0;
-    const queued =
-      Number(data.queued) || Math.max(total - completed - processing, 0);
+    const total = Number.isFinite(Number(data.total))
+      ? Number(data.total)
+      : 0;
+    const completed = Number.isFinite(Number(data.completed))
+      ? Number(data.completed)
+      : 0;
+    const processing = Number.isFinite(Number(data.processing))
+      ? Number(data.processing)
+      : 0;
+    pushProgress(clipProgressHistory, completed, total);
+    const ratePerMin = averageRatePerMinute(clipProgressHistory);
+    const remaining = Math.max(total - completed, 0);
+    const etaSeconds = computeEtaSeconds(remaining, ratePerMin);
     const percent = total ? Math.round((completed / total) * 100) : 0;
     clipProgressBar.style.width = `${percent}%`;
     clipProgressBar.dataset.label = `${percent}%`;
     const stateLabel = typeof data.state === "string" ? data.state : "idle";
-    clipSummary.textContent = `State: ${stateLabel} • ${completed}/${total} done • ${processing} processing • ${queued} queued`;
+    const errorCount = Number.isFinite(Number(data.error_count))
+      ? Number(data.error_count)
+      : 0;
+    const clipLines = [
+      `Completed: ${completed}/${total} (${percent}%)`,
+      `Pending: ${processing}`,
+      errorCount ? `Errors: ${errorCount}` : null,
+      buildRateSummary(ratePerMin, etaSeconds),
+    ].filter(Boolean);
+    clipSummary.textContent = clipLines.join("\n");
     if (clipToggleBtn) {
-      clipToggleBtn.hidden = !total;
-      clipToggleBtn.textContent = stateLabel === "paused" ? "Resume" : "Pause";
-      clipToggleBtn.dataset.state = stateLabel;
+      const isPaused = stateLabel === "paused";
+      const isComplete = !isPaused && remaining === 0;
+      updateStatusToggleButton(clipToggleBtn, {
+        hidden: false,
+        disabled: isComplete,
+        state: isComplete ? "complete" : isPaused ? "paused" : "running",
+        icon: isComplete ? "✔" : isPaused ? "▶" : "⏸",
+        label: isComplete
+          ? "CLIP indexing complete"
+          : isPaused
+            ? "Resume CLIP indexer"
+            : "Pause CLIP indexer",
+      });
     }
 
     const errors = Array.isArray(data.error_sample) ? data.error_sample : [];
@@ -3238,8 +3345,10 @@ async function pollAutoStatus() {
     const total = Number(data.total) || 0;
     const completed = Number(data.completed) || 0;
     const processing = Number(data.processing) || 0;
-    const queued =
-      Number(data.queued) || Math.max(total - completed - processing, 0);
+    pushProgress(autoProgressHistory, completed, total);
+    const ratePerMin = averageRatePerMinute(autoProgressHistory);
+    const remaining = Math.max(total - completed, 0);
+    const etaSeconds = computeEtaSeconds(remaining, ratePerMin);
     const errors = Array.isArray(data.error_sample) ? data.error_sample : [];
 
     if (!enabled) {
@@ -3251,6 +3360,12 @@ async function pollAutoStatus() {
         autoProgressBar.style.width = "0%";
         autoProgressBar.dataset.label = "0%";
       }
+      if (autoToggleBtn) {
+        updateStatusToggleButton(autoToggleBtn, {
+          hidden: true,
+          disabled: true,
+        });
+      }
       dismissToast("auto-error");
       requestAnimationFrame(updateStatusCardHeight);
       return;
@@ -3258,9 +3373,33 @@ async function pollAutoStatus() {
 
     autoStatusSection.classList.remove("status-disabled");
 
-    autoSummary.textContent = `State: ${stateLabel} • ${completed}/${total} done • ${processing} processing • ${queued} queued`;
+    const autoPercent = total ? Math.round((completed / total) * 100) : 0;
+    const autoErrors = Number.isFinite(Number(data.error_count))
+      ? Number(data.error_count)
+      : 0;
+    const autoLines = [
+      `Completed: ${completed}/${total} (${autoPercent}%)`,
+      `Pending: ${processing}`,
+      autoErrors ? `Errors: ${autoErrors}` : null,
+      buildRateSummary(ratePerMin, etaSeconds),
+    ].filter(Boolean);
+    autoSummary.textContent = autoLines.join("\n");
+    if (autoToggleBtn) {
+      const isPaused = data.paused === true || stateLabel === "paused";
+      const isComplete = enabled && !isPaused && remaining === 0;
+      updateStatusToggleButton(autoToggleBtn, {
+        hidden: !enabled,
+        disabled: isComplete,
+        state: isComplete ? "complete" : isPaused ? "paused" : "running",
+        icon: isComplete ? "✔" : isPaused ? "▶" : "⏸",
+        label: isComplete
+          ? "Auto tagger idle"
+          : isPaused
+            ? "Resume auto tagger"
+            : "Pause auto tagger",
+      });
+    }
     if (autoProgressBar) {
-      const autoPercent = total ? Math.round((completed / total) * 100) : 0;
       autoProgressBar.style.width = `${Math.max(0, Math.min(100, autoPercent))}%`;
       autoProgressBar.dataset.label = `${autoPercent}%`;
     }
@@ -3332,6 +3471,7 @@ async function pollRatingCounts() {
 async function toggleClipIndexer() {
   if (!clipToggleBtn) return;
   const state = clipToggleBtn.dataset.state;
+  if (state === "complete") return;
   const target = state === "paused" ? "resume" : "pause";
   try {
     const res = await fetch(`/api/clip/${target}`, { method: "POST" });
@@ -3343,6 +3483,23 @@ async function toggleClipIndexer() {
 }
 if (clipToggleBtn) {
   clipToggleBtn.addEventListener("click", toggleClipIndexer);
+}
+
+async function toggleAutoIndexer() {
+  if (!autoToggleBtn) return;
+  const state = autoToggleBtn.dataset.state;
+  if (state === "complete") return;
+  const target = state === "paused" ? "resume" : "pause";
+  try {
+    const res = await fetch(`/api/auto/${target}`, { method: "POST" });
+    if (!res.ok) throw new Error(res.statusText);
+    setTimeout(pollAutoStatus, 300);
+  } catch (err) {
+    autoSummary.textContent = "Unable to toggle auto tagger";
+  }
+}
+if (autoToggleBtn) {
+  autoToggleBtn.addEventListener("click", toggleAutoIndexer);
 }
 setInterval(() => {
   pollClipStatus();

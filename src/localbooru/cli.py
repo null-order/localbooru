@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import socket
 import threading
 import webbrowser
+from collections.abc import Mapping
 from contextlib import closing
 from pathlib import Path
 import sys
 from typing import Optional
 
-from .config import LocalBooruConfig
+from .config import (
+    LocalBooruConfig,
+    load_config_file,
+    render_default_config_template,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -114,12 +120,23 @@ def build_parser() -> argparse.ArgumentParser:
         description="LocalBooru – NovelAI browser with CLIP search"
     )
     parser.add_argument(
-        "--root", default=".", help="Root directory to scan for NovelAI PNGs"
+        "--root",
+        help="Root directory to scan for NovelAI PNGs (overrides config file)",
     )
-    parser.add_argument("--db", default="gallery.db", help="Path to SQLite database")
-    parser.add_argument("--thumb-cache", help="Path for thumbnail cache")
     parser.add_argument(
-        "--thumb-size", type=int, default=512, help="Maximum thumbnail size in pixels"
+        "--db",
+        help="Path to SQLite database (overrides config file)",
+    )
+    parser.add_argument(
+        "--thumb-cache",
+        help="Path for thumbnail cache (default: XDG cache)",
+        default=None,
+    )
+    parser.add_argument(
+        "--thumb-size",
+        type=int,
+        default=None,
+        help="Maximum thumbnail size in pixels (default: 512)",
     )
     parser.add_argument(
         "--watch", action="store_true", help="Enable background rescanner"
@@ -127,24 +144,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rescan-interval",
         type=int,
-        default=600,
-        help="Interval for rescans when watch mode enabled",
+        default=None,
+        help="Interval for rescans when watch mode enabled (seconds, default: 600)",
     )
     parser.add_argument(
         "--no-thumbs", action="store_true", help="Disable thumbnail generation"
     )
-    parser.add_argument("--host", default="127.0.0.1", help="Host to bind HTTP server")
     parser.add_argument(
-        "--port", type=int, default=8000, help="Port to bind HTTP server"
+        "--host",
+        help="Host to bind HTTP server (default: 127.0.0.1)",
+        default=None,
     )
     parser.add_argument(
-        "--clip-device", default="cpu", help="Device string for CLIP model (cpu/cuda)"
+        "--port",
+        type=int,
+        default=None,
+        help="Port to bind HTTP server (default: 8000)",
+    )
+    parser.add_argument(
+        "--clip-device",
+        help="Device string for CLIP model (default: cpu)",
+        default=None,
     )
     parser.add_argument(
         "--clip-batch-size",
         type=int,
-        default=8,
-        help="Image batch size for CLIP embedding computation",
+        default=None,
+        help="Image batch size for CLIP embedding computation (default: 8)",
     )
     parser.add_argument(
         "--no-clip",
@@ -152,10 +178,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable CLIP indexing and search features",
     )
     parser.add_argument(
-        "--clip-model-name", default="ViT-B-32-quickgelu", help="OpenCLIP model name"
+        "--clip-model-name",
+        help="OpenCLIP model name (default: ViT-B-32-quickgelu)",
+        default=None,
     )
     parser.add_argument(
-        "--clip-checkpoint", default="openai", help="OpenCLIP checkpoint name"
+        "--clip-checkpoint",
+        help="OpenCLIP checkpoint name (default: openai)",
+        default=None,
     )
     parser.add_argument(
         "--auto-tag-missing",
@@ -172,26 +202,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--auto-tag-model",
-        default="ConvNextV2",
-        help="WD14 model to load when auto-tagging is enabled",
+        help="WD14 model to load when auto-tagging is enabled (default: ConvNextV2)",
+        default=None,
     )
     parser.add_argument(
         "--auto-tag-general-threshold",
         type=float,
-        default=0.35,
-        help="Confidence threshold for WD14 general tags",
+        default=None,
+        help="Confidence threshold for WD14 general tags (default: 0.35)",
     )
     parser.add_argument(
         "--auto-tag-character-threshold",
         type=float,
-        default=0.85,
-        help="Confidence threshold for WD14 character tags",
+        default=None,
+        help="Confidence threshold for WD14 character tags (default: 0.85)",
     )
     parser.add_argument(
         "--auto-tag-mode",
         choices=["missing", "augment"],
-        default="augment",
-        help="Control whether WD14 tags only fill gaps or also augment embedded metadata",
+        default=None,
+        help="Control whether WD14 tags only fill gaps or also augment embedded metadata (default: augment)",
     )
     parser.add_argument(
         "--auto-tag-background",
@@ -209,8 +239,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--auto-tag-batch-size",
         type=int,
-        default=4,
-        help="Number of auto-tagging jobs to process per batch when background mode is enabled",
+        default=None,
+        help="Number of auto-tagging jobs to process per batch when background mode is enabled (default: 4)",
     )
     parser.add_argument(
         "--webview",
@@ -220,7 +250,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-ui", action="store_true", help="Run without opening a browser window"
     )
-    parser.add_argument("--log-level", default="INFO", help="Logging level")
+    parser.add_argument(
+        "--log-level", help="Logging level (default: INFO)", default=None
+    )
     parser.add_argument(
         "--extra-root",
         action="append",
@@ -231,6 +263,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--clip-only", action="store_true", help="Rebuild CLIP embeddings and exit"
+    )
+    parser.add_argument(
+        "--config",
+        help="Path to configuration file (JSON/TOML/YAML). Overrides may be provided by CLI flags.",
+    )
+    parser.add_argument(
+        "--cwd",
+        action="store_true",
+        help="Use legacy cwd-relative defaults (ignore config files unless explicitly provided).",
+    )
+    parser.add_argument(
+        "--print-config",
+        action="store_true",
+        help="Print an annotated configuration template (TOML) and exit.",
+    )
+    parser.add_argument(
+        "--service",
+        action="store_true",
+        help="Service mode: enable watch, disable UI launch, and prefer config defaults.",
     )
     parser.add_argument(
         "--status", action="store_true", help="Print CLIP/scan status and exit"
@@ -257,13 +308,66 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    config = LocalBooruConfig.from_args(args)
+    if getattr(args, "print_config", False):
+        print(render_default_config_template())
+        return 0
+
+    use_cwd_mode = bool(getattr(args, "cwd", False))
+    config_path_input = args.config or os.getenv("LOCALBOORU_CONFIG")
+    config_path = None
+
+    if use_cwd_mode:
+        if config_path_input:
+            LOGGER.error(
+                "--cwd cannot be combined with --config or LOCALBOORU_CONFIG"
+            )
+            return 2
+    else:
+        if not config_path_input:
+            default_config = Path.home() / ".localbooru.toml"
+            if default_config.exists():
+                config_path_input = str(default_config)
+        config_path = config_path_input
+
+    config_data = None
+    loaded_config_path = None
+    if config_path:
+        loaded_config_path = Path(config_path).expanduser()
+        try:
+            config_data = load_config_file(loaded_config_path)
+        except FileNotFoundError:
+            LOGGER.error("Configuration file not found: %s", loaded_config_path)
+            return 2
+        except Exception as exc:
+            LOGGER.error("Failed to load configuration %s: %s", loaded_config_path, exc)
+            return 2
+        if config_data is None:
+            config_data = {}
+        elif not isinstance(config_data, Mapping):
+            LOGGER.error(
+                "Configuration root must be a mapping; got %s", type(config_data).__name__
+            )
+            return 2
+        loaded_config_path = loaded_config_path.resolve()
+        LOGGER.info("Loaded configuration from %s", loaded_config_path)
+
+    config = LocalBooruConfig.from_sources(
+        args,
+        file_options=config_data,
+        config_path=loaded_config_path,
+    )
     setup_logging(config.log_level)
 
     config.port = find_free_port(config.host, config.port)
 
     LOGGER.info(
-        "localbooru starting", extra={"port": config.port, "root": str(config.root)}
+        "localbooru starting",
+        extra={
+            "port": config.port,
+            "roots": [str(path) for path in config.roots],
+            "service": config.service_mode,
+            "cwd_mode": use_cwd_mode,
+        },
     )
 
     # Deferred imports to avoid pulling heavy dependencies for simple status calls later.
@@ -272,6 +376,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     from .scanner import ScanProgress, Scanner
     from .server import create_http_server
     from .clip import ClipIndexer, ClipProgress
+    from .watchers import create_directory_watcher
 
 
     Path(config.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -302,6 +407,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     scanner = Scanner(
         config=config, db=db, clip_progress=progress, scan_progress=scan_progress
     )
+    directory_watcher = None
 
     if args.status:
         status = {
@@ -376,8 +482,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if auto_indexer:
         auto_indexer.start()
 
+    if config.watch and directory_watcher is None:
+        directory_watcher = create_directory_watcher(config, scanner)
+
     if config.watch:
         scanner.start()
+        if directory_watcher:
+            directory_watcher.start()
 
     app_url = f"http://{config.host}:{config.port}/"
     if not config.no_ui:
@@ -414,6 +525,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             auto_indexer.stop()
             auto_indexer.join()
         if config.watch:
+            if directory_watcher:
+                directory_watcher.stop()
             scanner.stop()
             scanner.join()
 

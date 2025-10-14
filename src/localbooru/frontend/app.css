@@ -582,6 +582,24 @@ main {
     text-transform: uppercase;
     opacity: 0.82;
 }
+.status-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.status-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1);
+    font-size: 11px;
+    line-height: 1;
+}
 
 .progress-track {
     position: relative;
@@ -616,6 +634,7 @@ main {
     font-size: 13px;
     opacity: 0.78;
     line-height: 1.45;
+    white-space: pre-line;
 }
 
 .status-errors {

@@ -8,13 +8,14 @@ version = "0.1.0"
 description = "Gallery and search for your memes and AI slop"
 authors = [{name = "Null", email = "null@nullorder.net"}]
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = [
   "pillow",
   "open_clip_torch",
   "torch",
   "torchvision",
   "pywebview",
+  "tomli; python_version < \"3.11\"",
 ]
 
 [project.optional-dependencies]
@@ -27,7 +28,10 @@ ui = [
   "pywebview",
 ]
 tagging = [
-  "imgutils[tagging]",
+  "dghs-imgutils",
+]
+watch = [
+  "watchdog>=2.1.0",
 ]
 
 [project.scripts]

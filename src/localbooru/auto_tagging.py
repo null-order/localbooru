@@ -36,6 +36,7 @@ class AutoTagProgress:
     last_update: Optional[float] = None
     errors: list[str] = field(default_factory=list)
     history: List[Tuple[float, int]] = field(default_factory=list)
+    paused: bool = False
 
     def snapshot(self, db: Optional[LocalBooruDatabase] = None) -> dict[str, object]:
         data = {
@@ -47,6 +48,7 @@ class AutoTagProgress:
             "current_path": self.current_path,
             "last_update": self.last_update,
             "errors": self.errors[-5:],
+            "paused": self.paused,
         }
         if db is not None:
             total, completed, processing, errors = db.auto_tag_progress_counts()
@@ -64,7 +66,9 @@ class AutoTagProgress:
         rate_per_min, eta_seconds = self._compute_rate_eta()
         data["rate_per_min"] = rate_per_min
         data["eta_seconds"] = eta_seconds
-        if data["processing"] or data.get("queued", 0):
+        if self.paused:
+            state = "paused"
+        elif data["processing"] or data.get("queued", 0):
             state = "running"
         else:
             state = "idle"
@@ -122,9 +126,17 @@ class AutoTagIndexer(threading.Thread):
         self.config = config
         self.progress = progress
         self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._pause_event.set()
+        self.progress.paused = False
 
     def run(self) -> None:  # pragma: no cover - background worker
         while not self._stop_event.is_set():
+            if not self._pause_event.is_set():
+                self.progress.paused = True
+                time.sleep(0.5)
+                continue
+            self.progress.paused = False
             processed = self._process_batch()
             if not processed:
                 time.sleep(2.0)
@@ -135,9 +147,21 @@ class AutoTagIndexer(threading.Thread):
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._pause_event.set()
 
     def join(self, timeout: Optional[float] = None) -> None:
         super().join(timeout)
+
+    def pause(self) -> None:
+        self._pause_event.clear()
+        self.progress.paused = True
+
+    def resume(self) -> None:
+        self._pause_event.set()
+        self.progress.paused = False
+
+    def is_paused(self) -> bool:
+        return not self._pause_event.is_set()
 
     def _record_error(self, message: str) -> None:
         self.progress.errors.append(message)
@@ -145,6 +169,8 @@ class AutoTagIndexer(threading.Thread):
             self.progress.errors.pop(0)
 
     def _process_batch(self) -> bool:
+        if not self._pause_event.is_set():
+            return False
         batch = self.db.reserve_auto_tag_batch(self.config.auto_tag_batch_size)
         if not batch:
             self.progress.processing = 0
@@ -205,7 +231,8 @@ def _load_wd14() -> Callable[..., object]:
         module = import_module("imgutils.tagging")
     except ModuleNotFoundError as exc:  # pragma: no cover - dependency missing
         raise AutoTaggingUnavailable(
-            "imgutils[tagging] is required for --auto-tag-missing; install with `pip install 'imgutils[tagging]'`."
+            "dghs-imgutils is required for --auto-tag-missing; install with "
+            "`pip install 'dghs-imgutils'` (or 'dghs-imgutils[gpu]' when using CUDA/ROCm)."
         ) from exc
     except Exception as exc:  # pragma: no cover - defensive around dynamic loader
         raise AutoTaggingUnavailable(f"Unable to load imgutils.tagging: {exc}") from exc
