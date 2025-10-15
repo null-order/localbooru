@@ -45,6 +45,9 @@ SCHEMA_STATEMENTS = [
     ");",
     "CREATE INDEX IF NOT EXISTS tags_kind_norm_idx ON tags(kind, norm);",
     "CREATE INDEX IF NOT EXISTS tags_kind_norm_image_idx ON tags(kind, norm, image_id);",
+    "CREATE INDEX IF NOT EXISTS tags_image_id_idx ON tags(image_id);",
+    "CREATE INDEX IF NOT EXISTS tags_facets_idx ON tags(image_id, norm, kind, tag);",
+    "CREATE INDEX IF NOT EXISTS images_mtime_id_idx ON images(mtime DESC, id DESC);",
     "CREATE VIRTUAL TABLE IF NOT EXISTS tag_index USING fts5(\n"
     "    norm,\n"
     "    tag,\n"
@@ -544,9 +547,7 @@ class LocalBooruDatabase:
         conn = self.new_connection()
         try:
             with conn:
-                result = self._apply_auto_tags_internal(
-                    conn, image_id, tags, strategy
-                )
+                result = self._apply_auto_tags_internal(conn, image_id, tags, strategy)
                 normalized_scores = self._normalize_scores(rating_scores)
                 if normalized_scores:
                     self._apply_rating_scores_internal(
@@ -574,10 +575,7 @@ class LocalBooruDatabase:
             "SELECT norm, kind FROM tags WHERE image_id=?",
             (image_id,),
         ).fetchall()
-        existing_tags = {
-            (row["norm"], row["kind"])
-            for row in existing_rows
-        }
+        existing_tags = {(row["norm"], row["kind"]) for row in existing_rows}
 
         if strategy == "missing":
             to_add = [
@@ -640,10 +638,48 @@ class LocalBooruDatabase:
             "SELECT norm, COUNT(DISTINCT image_id) AS freq FROM tags WHERE kind='rating' GROUP BY norm",
         ).fetchall()
         return {
-            (row["norm"] or "").lower(): int(row["freq"] or 0)
-            for row in rows
-            if row
+            (row["norm"] or "").lower(): int(row["freq"] or 0) for row in rows if row
         }
+
+    def get_complete_tag_stats(self) -> Tuple[List[Dict[str, object]], float]:
+        """Get complete tag statistics with last modified timestamp."""
+        import time
+
+        # Get the most recent tag modification time
+        last_modified_row = self._connection.execute(
+            "SELECT MAX(mtime) as last_mod FROM images WHERE id IN (SELECT DISTINCT image_id FROM tags)"
+        ).fetchone()
+        last_modified = float(last_modified_row["last_mod"] or 0)
+
+        # Get complete tag statistics
+        rows = self._connection.execute("""
+            SELECT tag, norm, kind, COUNT(DISTINCT image_id) as freq
+            FROM tags
+            GROUP BY norm, kind
+            ORDER BY
+                CASE kind
+                    WHEN 'prompt' THEN 0
+                    WHEN 'character' THEN 1
+                    WHEN 'rating' THEN 2
+                    WHEN 'description' THEN 3
+                    WHEN 'negative' THEN 4
+                    ELSE 5
+                END,
+                freq DESC,
+                tag ASC
+        """).fetchall()
+
+        tag_stats = [
+            {
+                "tag": row["tag"],
+                "norm": row["norm"],
+                "kind": row["kind"],
+                "freq": row["freq"],
+            }
+            for row in rows
+        ]
+
+        return tag_stats, last_modified
 
     # --- Rating operations ---------------------------------------------------------
 
@@ -660,7 +696,9 @@ class LocalBooruDatabase:
         conn = self.new_connection()
         try:
             with conn:
-                self._apply_rating_scores_internal(conn, image_id, normalized, model=model)
+                self._apply_rating_scores_internal(
+                    conn, image_id, normalized, model=model
+                )
         finally:
             conn.close()
 

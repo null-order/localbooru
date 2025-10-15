@@ -153,7 +153,13 @@ def autocomplete_tags(
         if norm and len(norm) >= 2:
             like_sql = "SELECT tag, norm, kind, COUNT(DISTINCT image_id) AS freq FROM tags WHERE norm LIKE ?"
             like_params: List[object] = [like_pattern]
-            if kind_filter in ("prompt", "negative", "character", "description", "rating"):
+            if kind_filter in (
+                "prompt",
+                "negative",
+                "character",
+                "description",
+                "rating",
+            ):
                 like_sql += " AND kind = ?"
                 like_params.append(kind_filter)
             like_sql += " GROUP BY norm, kind ORDER BY freq DESC LIMIT ?"

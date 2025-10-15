@@ -19,9 +19,7 @@ const autoProgressBar = document.getElementById("auto-progress-bar");
 const autoToggleBtn = document.getElementById("auto-toggle");
 const ratingCardEl = document.getElementById("rating-card");
 const ratingFilterInputs = ratingCardEl
-  ? Array.from(
-      ratingCardEl.querySelectorAll("input[type=\"checkbox\"]"),
-    )
+  ? Array.from(ratingCardEl.querySelectorAll('input[type="checkbox"]'))
   : [];
 const ratingFilterMeta = ratingFilterInputs.map((input) => {
   const label = input.closest("label");
@@ -115,6 +113,9 @@ let currentDetailId = null;
 let currentDetailIndex = -1;
 let hideUCTags = true;
 let facetCache = [];
+let tagStatsCache = new Map(); // norm|kind -> {tag, norm, kind, freq}
+let tagStatsLastModified = 0;
+let tagStatsLoading = false;
 let autoObserver = null;
 let currentPrompts = { positive: "", negative: "" };
 let currentHotspotCenters = null;
@@ -153,7 +154,8 @@ function buildRateSummary(rate, etaSeconds) {
   const value = Number(rate);
   let rateLabel = "—";
   if (Number.isFinite(value) && value > 0) {
-    rateLabel = value >= 1 ? `${value.toFixed(1)}/min` : `${value.toFixed(2)}/min`;
+    rateLabel =
+      value >= 1 ? `${value.toFixed(1)}/min` : `${value.toFixed(2)}/min`;
   }
   let summary = `Rate: ${rateLabel}`;
   const etaLabel = formatEtaLabel(etaSeconds);
@@ -163,7 +165,10 @@ function buildRateSummary(rate, etaSeconds) {
   return summary;
 }
 
-function updateStatusToggleButton(button, { state, icon, label, hidden, disabled }) {
+function updateStatusToggleButton(
+  button,
+  { state, icon, label, hidden, disabled },
+) {
   if (!button) return;
   if (typeof hidden === "boolean") button.hidden = hidden;
   if (typeof disabled === "boolean") button.disabled = disabled;
@@ -759,21 +764,13 @@ async function startClipUploadSearch(file) {
     searchState.done = clipOffset >= clipTotal;
     loadMoreBtn.style.display = searchState.done ? "none" : "block";
 
-    const backendFacets = Array.isArray(data.facets) ? data.facets : null;
     const computedFacets = buildClipFacetSummaryFromImageTags(
       searchState.imageTags,
     );
     if (computedFacets.length) {
       facetCache = computedFacets;
-    } else if (backendFacets && backendFacets.length) {
-      facetCache = backendFacets.map((facet) => ({
-        tag: facet.tag,
-        norm: facet.norm,
-        kind: facet.kind,
-        freq: facet.freq,
-      }));
     } else {
-      facetCache = [];
+      facetCache = computeFacetsFromCurrentImages();
     }
     renderFacets(facetCache);
 
@@ -1043,13 +1040,15 @@ function updateRatingFilterCounts(countsOverride) {
       }
     });
   } else {
-    const facets = Array.isArray(facetCache) ? facetCache : [];
-    facets.forEach((facet) => {
-      if (!facet || facet.kind !== "rating") return;
-      const norm = typeof facet.norm === "string" ? facet.norm.toLowerCase() : "";
-      if (!norm) return;
-      const freq = Number.isFinite(facet.freq) ? Number(facet.freq) : 0;
-      counts.set(norm, freq);
+    // Use cached tag stats for rating counts
+    tagStatsCache.forEach((stats, key) => {
+      if (stats.kind === "rating") {
+        const norm =
+          typeof stats.norm === "string" ? stats.norm.toLowerCase() : "";
+        if (norm) {
+          counts.set(norm, stats.freq);
+        }
+      }
     });
   }
   ratingFilterMeta.forEach(({ label, countEl, value }) => {
@@ -1138,11 +1137,7 @@ function buildStatusChip(title, state) {
   ) {
     label = `${label} (#${state.position})`;
   }
-  if (
-    status === "ready" &&
-    typeof state.rating === "string" &&
-    state.rating
-  ) {
+  if (status === "ready" && typeof state.rating === "string" && state.rating) {
     const ratingText = state.rating.replace(/_/g, " ");
     label = `${label} (${ratingText})`;
   }
@@ -1524,7 +1519,7 @@ async function fetchImages(reset = false) {
       autoObserver.observe(sentinel);
     }
     clearHighlights();
-    facetCache = Array.isArray(data.facets) ? data.facets : [];
+    facetCache = computeFacetsFromCurrentImages();
     renderFacets(facetCache);
     searchState.total = data.total;
     searchState.done = searchState.images.length >= data.total;
@@ -1619,7 +1614,7 @@ async function runClipSearch(
     if (autoObserver) {
       autoObserver.unobserve(sentinel);
     }
-    facetCache = [];
+    facetCache = computeFacetsFromCurrentImages();
     renderFacets(facetCache);
   } else {
     statusEl.textContent = "Loading clip results…";
@@ -1707,21 +1702,13 @@ async function runClipSearch(
     clipTotal = data.total ?? clipTotal ?? 0;
     clipOffset += results.length;
 
-    const backendFacets = Array.isArray(data.facets) ? data.facets : null;
     const computedFacets = buildClipFacetSummaryFromImageTags(
       searchState.imageTags,
     );
     if (computedFacets.length) {
       facetCache = computedFacets;
-    } else if (backendFacets && backendFacets.length) {
-      facetCache = backendFacets.map((facet) => ({
-        tag: facet.tag,
-        norm: facet.norm,
-        kind: facet.kind,
-        freq: facet.freq,
-      }));
     } else {
-      facetCache = [];
+      facetCache = computeFacetsFromCurrentImages();
     }
     renderFacets(facetCache);
     searchState.total = clipTotal;
@@ -2634,9 +2621,7 @@ function updateDetailRating(ratingData) {
   }
 
   let value =
-    ratingData && typeof ratingData.value === "string"
-      ? ratingData.value
-      : "";
+    ratingData && typeof ratingData.value === "string" ? ratingData.value : "";
   let confidence =
     ratingData && typeof ratingData.confidence === "number"
       ? ratingData.confidence
@@ -2646,10 +2631,13 @@ function updateDetailRating(ratingData) {
     const best = RATING_CLASSES.map((key) => ({
       key,
       score: scoreMap[key] ?? -1,
-    })).reduce((prev, current) => (current.score > prev.score ? current : prev), {
-      key: "",
-      score: -1,
-    });
+    })).reduce(
+      (prev, current) => (current.score > prev.score ? current : prev),
+      {
+        key: "",
+        score: -1,
+      },
+    );
     if (best.key) {
       value = best.key;
       confidence = best.score;
@@ -3204,6 +3192,102 @@ if ("IntersectionObserver" in window) {
 
 detailImage.addEventListener("load", () => positionHotspots());
 window.addEventListener("resize", () => positionHotspots());
+
+// Initialize tag stats cache on page load
+document.addEventListener("DOMContentLoaded", () => {
+  fetchTagStats();
+});
+
+// Periodically refresh tag stats (every 60 seconds, server caches more frequently)
+setInterval(() => {
+  fetchTagStats();
+}, 60000);
+
+async function fetchTagStats() {
+  if (tagStatsLoading) return;
+
+  tagStatsLoading = true;
+  try {
+    const headers = {};
+    if (tagStatsLastModified > 0) {
+      headers["If-Modified-Since"] = new Date(
+        tagStatsLastModified * 1000,
+      ).toUTCString();
+    }
+
+    const res = await fetch("/api/tag-stats", { headers });
+
+    if (res.status === 304) {
+      // Not modified, cache is still valid
+      return;
+    }
+
+    if (!res.ok) {
+      console.error("Failed to fetch tag stats:", res.statusText);
+      return;
+    }
+
+    const data = await res.json();
+
+    // Update cache
+    tagStatsCache.clear();
+    if (Array.isArray(data.tags)) {
+      data.tags.forEach((tag) => {
+        const key = `${tag.norm}|${tag.kind}`;
+        tagStatsCache.set(key, tag);
+      });
+    }
+
+    tagStatsLastModified = data.last_modified || 0;
+
+    // Update rating counts immediately
+    updateRatingFilterCounts();
+
+    // Recompute facets if we have current images
+    if (searchState.images.length > 0) {
+      facetCache = computeFacetsFromCurrentImages();
+      renderFacets(facetCache);
+    }
+  } catch (err) {
+    console.error("Error fetching tag stats:", err);
+  } finally {
+    tagStatsLoading = false;
+  }
+}
+
+function computeFacetsFromCurrentImages() {
+  const facetCounts = new Map();
+  const seen = new Set();
+
+  searchState.images.forEach((image) => {
+    const tags = searchState.imageTags.get(image.id) || [];
+    tags.forEach((tag) => {
+      if (!tag || typeof tag !== "object") return;
+
+      const key = `${tag.norm}|${tag.kind}`;
+      const cacheKey = `${tag.norm}|${tag.kind}`;
+
+      // Skip duplicates within this image
+      if (seen.has(`${image.id}|${key}`)) return;
+      seen.add(`${image.id}|${key}`);
+
+      // Get global stats from cache
+      const globalStats = tagStatsCache.get(cacheKey);
+      if (globalStats) {
+        facetCounts.set(key, {
+          tag: globalStats.tag,
+          norm: globalStats.norm,
+          kind: globalStats.kind,
+          freq: globalStats.freq, // Global frequency from cache
+          localCount: (facetCounts.get(key)?.localCount || 0) + 1, // Local count in current results
+        });
+      }
+    });
+  });
+
+  return Array.from(facetCounts.values());
+}
+
 async function pollClipStatus() {
   if (!clipSummary) return;
   try {
@@ -3242,9 +3326,7 @@ async function pollClipStatus() {
     if (detailSimilarBtn && Number.isFinite(currentDetailId))
       detailSimilarBtn.disabled = false;
 
-    const total = Number.isFinite(Number(data.total))
-      ? Number(data.total)
-      : 0;
+    const total = Number.isFinite(Number(data.total)) ? Number(data.total) : 0;
     const completed = Number.isFinite(Number(data.completed))
       ? Number(data.completed)
       : 0;

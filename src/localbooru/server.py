@@ -35,7 +35,6 @@ from .scanner import Scanner
 from .metadata import extract_character_details
 from .search import (
     autocomplete_tags,
-    collect_tag_facets,
     fetch_tags_for_images,
     matched_image_ids,
     search_images,
@@ -262,6 +261,9 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/tags":
             self._handle_tags(parsed.query)
             return
+        if path == "/api/tag-stats":
+            self._handle_tag_stats()
+            return
         if path.startswith("/files/"):
             identifier = path[len("/files/") :]
             self._handle_file(identifier)
@@ -349,10 +351,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         cache = getattr(self.server, "_rating_counts_cache", None)
         now = time.time()
         ttl = 5.0
-        if (
-            not isinstance(cache, dict)
-            or (now - cache.get("timestamp", 0)) > ttl
-        ):
+        if not isinstance(cache, dict) or (now - cache.get("timestamp", 0)) > ttl:
             counts = db.rating_counts()
             cache = {"timestamp": now, "counts": counts}
             setattr(self.server, "_rating_counts_cache", cache)
@@ -419,7 +418,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         try:
             tokens = tokens_from_query(query)
             rows, total = search_images(conn, tokens, limit, offset)
-            facets = collect_tag_facets(conn, tokens)
+
             image_ids = [row["id"] for row in rows]
             tag_map = fetch_tags_for_images(conn, image_ids)
         finally:
@@ -445,8 +444,53 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             }
             for row in rows
         ]
-        payload = {"images": images, "total": total, "facets": facets}
+        payload = {"images": images, "total": total}
         self._send_json(payload)
+
+    def _handle_tag_stats(self) -> None:
+        """Handle /api/tag-stats endpoint with conditional fetching."""
+        try:
+            tag_stats, last_modified = self.server.get_cached_tag_stats()  # type: ignore[attr-defined]
+        except Exception as e:
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"Cache error: {e}")
+            return
+
+        # Support conditional fetching with If-Modified-Since
+        if_modified_since = self.headers.get("If-Modified-Since")
+        if if_modified_since:
+            try:
+                from email.utils import parsedate_to_datetime
+
+                client_time = parsedate_to_datetime(if_modified_since).timestamp()
+                if last_modified <= client_time:
+                    self.send_response(HTTPStatus.NOT_MODIFIED)
+                    self.end_headers()
+                    return
+            except (ValueError, TypeError):
+                # Invalid date format, continue with full response
+                pass
+
+        payload = {
+            "tags": tag_stats,
+            "last_modified": last_modified,
+            "count": len(tag_stats),
+        }
+
+        # Send response with Last-Modified header
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(body)))
+
+        # Add Last-Modified header for conditional requests
+        from email.utils import formatdate
+
+        last_modified_str = formatdate(last_modified, usegmt=True)
+        self.send_header("Last-Modified", last_modified_str)
+
+        self.end_headers()
+        self.wfile.write(body)
 
     def _handle_tags(self, query_string: str) -> None:
         params = urllib.parse.parse_qs(query_string)
@@ -644,7 +688,9 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                     payload = json.loads(raw_payload)
                 except json.JSONDecodeError:
                     continue
-                scores_payload = payload.get("scores") if isinstance(payload, dict) else None
+                scores_payload = (
+                    payload.get("scores") if isinstance(payload, dict) else None
+                )
                 if isinstance(scores_payload, dict):
                     rating_scores = {
                         str(k).lower(): float(v)
@@ -653,7 +699,9 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                     }
                     break
         if not rating_value and rating_scores:
-            best_label, best_score = max(rating_scores.items(), key=lambda item: item[1])
+            best_label, best_score = max(
+                rating_scores.items(), key=lambda item: item[1]
+            )
             rating_value = best_label
             rating_confidence = best_score
         data["rating"] = {
@@ -1251,6 +1299,21 @@ class LocalBooruHTTPServer(ThreadingHTTPServer):
         self.auto_indexer = auto_indexer
         self._thumb_lock = threading.Lock()
 
+        # Tag stats cache
+        self._tag_stats_cache = []
+        self._tag_stats_last_modified = 0.0
+        self._tag_stats_lock = threading.RLock()
+        self._tag_stats_thread = None
+        self._shutdown_event = threading.Event()
+
+        # Initialize tag stats cache before server starts
+        LOGGER.info("Initializing tag stats cache...")
+        self._refresh_tag_stats_cache()
+        LOGGER.info(
+            "Tag stats cache initialized with %d tags", len(self._tag_stats_cache)
+        )
+        self._start_tag_stats_refresh_thread()
+
         def _resolve_base(path: Path) -> Path:
             if path is None:
                 return Path.cwd()
@@ -1345,6 +1408,62 @@ class LocalBooruHTTPServer(ThreadingHTTPServer):
                 return None
         return dest
 
+    def _refresh_tag_stats_cache(self) -> None:
+        """Refresh the in-memory tag stats cache from the database."""
+        if not self.db:
+            return
+
+        try:
+            tag_stats, last_modified = self.db.get_complete_tag_stats()
+            with self._tag_stats_lock:
+                old_count = len(self._tag_stats_cache)
+                self._tag_stats_cache = tag_stats
+                self._tag_stats_last_modified = last_modified
+                LOGGER.debug(
+                    "Tag stats cache refreshed: %d tags (was %d), last_modified=%s",
+                    len(tag_stats),
+                    old_count,
+                    time.ctime(last_modified),
+                )
+        except Exception as e:
+            LOGGER.error("Failed to refresh tag stats cache: %s", e)
+
+    def _start_tag_stats_refresh_thread(self) -> None:
+        """Start the background thread that periodically refreshes tag stats."""
+
+        def refresh_loop():
+            LOGGER.info("Tag stats refresh thread started (20 second interval)")
+            while not self._shutdown_event.is_set():
+                # Wait for 20 seconds or until shutdown
+                if self._shutdown_event.wait(20.0):
+                    break
+                self._refresh_tag_stats_cache()
+            LOGGER.info("Tag stats refresh thread stopped")
+
+        self._tag_stats_thread = threading.Thread(target=refresh_loop, daemon=True)
+        self._tag_stats_thread.start()
+
+    def get_cached_tag_stats(self) -> Tuple[List[Dict[str, object]], float]:
+        """Get tag stats from the in-memory cache."""
+        with self._tag_stats_lock:
+            return self._tag_stats_cache.copy(), self._tag_stats_last_modified
+
+    def shutdown(self) -> None:
+        """Shutdown the server and background threads."""
+        self._shutdown_event.set()
+        if self._tag_stats_thread and self._tag_stats_thread.is_alive():
+            self._tag_stats_thread.join(timeout=1.0)
+        super().shutdown()
+
+    def refresh_tag_stats_cache(self) -> None:
+        """Trigger an immediate refresh of the tag stats cache.
+
+        Call this when tags have been modified (e.g., after image imports,
+        auto-tagging, or manual tag changes).
+        """
+        LOGGER.info("Tag stats cache refresh triggered manually")
+        self._refresh_tag_stats_cache()
+
 
 def run_server(
     config: LocalBooruConfig,
@@ -1362,10 +1481,15 @@ def run_server(
         auto_progress=None,
         auto_indexer=None,
     )
-    LOGGER.info("HTTP server listening on http://%s:%d", config.host, config.port)
+    LOGGER.info(
+        "HTTP server ready, starting to listen on http://%s:%d",
+        config.host,
+        config.port,
+    )
     try:
         httpd.serve_forever()
     finally:
+        httpd.shutdown()
         httpd.server_close()
 
 
