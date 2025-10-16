@@ -414,10 +414,11 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         offset = max(offset, 0)
 
         db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
+        config: LocalBooruConfig = self.server.config  # type: ignore[attr-defined]
         conn = db.new_connection()
         try:
             tokens = tokens_from_query(query)
-            rows, total = search_images(conn, tokens, limit, offset)
+            rows, total = search_images(conn, tokens, limit, offset, config)
 
             image_ids = [row["id"] for row in rows]
             tag_map = fetch_tags_for_images(conn, image_ids)
@@ -944,7 +945,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             conn = db.new_connection()
             try:
                 tokens = tokens_from_query(tag_query)
-                restrict_ids = matched_image_ids(conn, tokens)
+                restrict_ids = matched_image_ids(conn, tokens, config)
             finally:
                 conn.close()
 
@@ -1081,7 +1082,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             conn = self.server.db.new_connection()  # type: ignore[attr-defined]
             try:
                 tokens = tokens_from_query(tag_query)
-                restrict_ids = matched_image_ids(conn, tokens)
+                restrict_ids = matched_image_ids(conn, tokens, config)
             finally:
                 conn.close()
 

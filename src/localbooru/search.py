@@ -4,11 +4,51 @@ from __future__ import annotations
 
 import sqlite3
 from collections import defaultdict
-from typing import Dict, List, Sequence, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
+
+if TYPE_CHECKING:
+    from .config import LocalBooruConfig
 
 from .tags import normalize_tag, parse_query_tokens
 
 QueryToken = Tuple[str, str, bool]
+
+
+def normalize_path_pattern(pattern: str, config: Optional["LocalBooruConfig"]) -> str:
+    """Normalize a path pattern based on configured roots.
+
+    If the pattern starts with the main root, convert to relative.
+    If it starts with an extra root, keep as absolute.
+    Auto-adds wildcards for better UX if no wildcards are present.
+    """
+    if not config:
+        pattern = pattern.strip()
+    else:
+        pattern = pattern.strip()
+
+        # Check main root first
+        main_root_str = str(config.root).rstrip("/") + "/"
+        if pattern.startswith(main_root_str):
+            relative = pattern[len(main_root_str) :].lstrip("/")
+            pattern = relative
+
+        # Check extra roots
+        else:
+            for extra_root in config.extra_roots:
+                extra_root_str = str(extra_root).rstrip("/") + "/"
+                if pattern.startswith(extra_root_str):
+                    break  # Keep absolute pattern as-is
+
+    # Auto-add wildcards for better user experience
+    if pattern and "*" not in pattern and "?" not in pattern:
+        # If pattern ends with /, treat as directory search
+        if pattern.endswith("/"):
+            pattern = f"*/{pattern.rstrip('/')}/*"
+        else:
+            # Otherwise treat as substring search
+            pattern = f"*{pattern}*"
+
+    return pattern
 
 
 def tokens_from_query(query: str) -> List[QueryToken]:
@@ -19,39 +59,57 @@ def _fts_quote(term: str) -> str:
     return '"' + term.replace('"', '""') + '"'
 
 
-def build_matched_cte(tokens: Sequence[QueryToken]) -> Tuple[str, List[str]]:
+def build_matched_cte(
+    tokens: Sequence[QueryToken], config: Optional["LocalBooruConfig"] = None
+) -> Tuple[str, List[str]]:
     positives = [t for t in tokens if not t[2]]
     negatives = [t for t in tokens if t[2]]
 
     positive_clauses: List[str] = []
     positive_params: List[str] = []
     for norm, kind, _ in positives:
-        match = f"norm:{_fts_quote(norm)}"
-        if kind == "any":
+        if kind == "path":
+            # Handle path searches with GLOB pattern matching
+            normalized_pattern = normalize_path_pattern(norm, config)
             positive_clauses.append(
-                "SELECT DISTINCT CAST(image_id AS INTEGER) FROM tag_index WHERE kind IN ('prompt','character') AND tag_index MATCH ?"
+                "SELECT DISTINCT CAST(id AS INTEGER) FROM images WHERE path GLOB ?"
             )
-            positive_params.append(match)
+            positive_params.append(normalized_pattern)
         else:
-            positive_clauses.append(
-                "SELECT DISTINCT CAST(image_id AS INTEGER) FROM tag_index WHERE kind=? AND tag_index MATCH ?"
-            )
-            positive_params.extend([kind, match])
+            match = f"norm:{_fts_quote(norm)}"
+            if kind == "any":
+                positive_clauses.append(
+                    "SELECT DISTINCT CAST(image_id AS INTEGER) FROM tag_index WHERE kind IN ('prompt','character') AND tag_index MATCH ?"
+                )
+                positive_params.append(match)
+            else:
+                positive_clauses.append(
+                    "SELECT DISTINCT CAST(image_id AS INTEGER) FROM tag_index WHERE kind=? AND tag_index MATCH ?"
+                )
+                positive_params.extend([kind, match])
 
     negative_clauses: List[str] = []
     negative_params: List[str] = []
     for norm, kind, _ in negatives:
-        match = f"norm:{_fts_quote(norm)}"
-        if kind == "any":
+        if kind == "path":
+            # Handle negative path searches
+            normalized_pattern = normalize_path_pattern(norm, config)
             negative_clauses.append(
-                "SELECT DISTINCT CAST(image_id AS INTEGER) FROM tag_index WHERE kind IN ('prompt','character') AND tag_index MATCH ?"
+                "SELECT DISTINCT CAST(id AS INTEGER) FROM images WHERE path GLOB ?"
             )
-            negative_params.append(match)
+            negative_params.append(normalized_pattern)
         else:
-            negative_clauses.append(
-                "SELECT DISTINCT CAST(image_id AS INTEGER) FROM tag_index WHERE kind=? AND tag_index MATCH ?"
-            )
-            negative_params.extend([kind, match])
+            match = f"norm:{_fts_quote(norm)}"
+            if kind == "any":
+                negative_clauses.append(
+                    "SELECT DISTINCT CAST(image_id AS INTEGER) FROM tag_index WHERE kind IN ('prompt','character') AND tag_index MATCH ?"
+                )
+                negative_params.append(match)
+            else:
+                negative_clauses.append(
+                    "SELECT DISTINCT CAST(image_id AS INTEGER) FROM tag_index WHERE kind=? AND tag_index MATCH ?"
+                )
+                negative_params.extend([kind, match])
 
     filters: List[str] = []
     params: List[str] = []
@@ -74,8 +132,9 @@ def search_images(
     tokens: Sequence[QueryToken],
     limit: int,
     offset: int,
+    config: Optional["LocalBooruConfig"] = None,
 ) -> Tuple[List[sqlite3.Row], int]:
-    cte, params = build_matched_cte(tokens)
+    cte, params = build_matched_cte(tokens, config)
     count_sql = f"{cte} SELECT COUNT(*) FROM matched"
     total_rows = conn.execute(count_sql, params).fetchone()[0]
     data_sql = (
@@ -92,8 +151,9 @@ def collect_tag_facets(
     conn: sqlite3.Connection,
     tokens: Sequence[QueryToken],
     limit: int = 100,
+    config: Optional["LocalBooruConfig"] = None,
 ) -> List[Dict[str, object]]:
-    cte, params = build_matched_cte(tokens)
+    cte, params = build_matched_cte(tokens, config)
     sql = (
         f"{cte} "
         "SELECT t.tag, t.norm, t.kind, COUNT(*) AS freq "
@@ -108,12 +168,14 @@ def collect_tag_facets(
 
 
 def matched_image_ids(
-    conn: sqlite3.Connection, tokens: Sequence[QueryToken]
+    conn: sqlite3.Connection,
+    tokens: Sequence[QueryToken],
+    config: Optional["LocalBooruConfig"] = None,
 ) -> List[int]:
     if not tokens:
         rows = conn.execute("SELECT id FROM images").fetchall()
         return [row[0] for row in rows]
-    cte, params = build_matched_cte(tokens)
+    cte, params = build_matched_cte(tokens, config)
     sql = f"{cte} SELECT image_id FROM matched"
     rows = conn.execute(sql, tuple(params)).fetchall()
     return [row[0] for row in rows]
@@ -135,25 +197,74 @@ def autocomplete_tags(
         params.append(limit)
         rows = conn.execute(sql, tuple(params)).fetchall()
     else:
-        norm = normalize_tag(prefix)
-        match = f"norm:{norm}*"
-        params: List[object] = [match]
-        sql = (
-            "SELECT tag, norm, kind, COUNT(DISTINCT image_id) AS freq "
-            "FROM tag_index WHERE tag_index MATCH ?"
-        )
-        if kind_filter in ("prompt", "negative", "character", "description", "rating"):
-            sql += " AND kind = ?"
-            params.append(kind_filter)
-        sql += " GROUP BY norm, kind ORDER BY freq DESC"
-        rows = conn.execute(sql, tuple(params)).fetchall()
-        seen = {(row[1], row[2]) for row in rows}
-        results = list(rows)
+        # Parse search prefixes to extract the actual search term
+        lowered = prefix.lower()
+        search_term = prefix
+        extracted_kind_filter = kind_filter
+
+        # Check for search prefixes and extract the search term
+        if lowered.startswith("path:") or lowered.startswith("in:"):
+            # For path searches, don't return tag suggestions since they're not applicable
+            return []
+        elif lowered.startswith("char:"):
+            search_term = prefix[5:].strip()
+            extracted_kind_filter = "character"
+        elif lowered.startswith("character:"):
+            search_term = prefix[10:].strip()
+            extracted_kind_filter = "character"
+        elif lowered.startswith("prompt:"):
+            search_term = prefix[7:].strip()
+            extracted_kind_filter = "prompt"
+        elif lowered.startswith("uc:"):
+            search_term = prefix[3:].strip()
+            extracted_kind_filter = "negative"
+        elif lowered.startswith("rating:"):
+            search_term = prefix[7:].strip()
+            extracted_kind_filter = "rating"
+        elif lowered in ("path", "in", "prompt", "char", "character", "uc", "rating"):
+            # Just the prefix without colon - don't return suggestions
+            return []
+
+        # If we extracted an empty search term, don't proceed
+        if not search_term:
+            return []
+
+        norm = normalize_tag(search_term)
+        # Skip if normalization results in empty string or contains problematic characters
+        if not norm:
+            return []
+
+        try:
+            match = f"norm:{norm}*"
+            params: List[object] = [match]
+            sql = (
+                "SELECT tag, norm, kind, COUNT(DISTINCT image_id) AS freq "
+                "FROM tag_index WHERE tag_index MATCH ?"
+            )
+            if extracted_kind_filter in (
+                "prompt",
+                "negative",
+                "character",
+                "description",
+                "rating",
+            ):
+                sql += " AND kind = ?"
+                params.append(extracted_kind_filter)
+            sql += " GROUP BY norm, kind ORDER BY freq DESC"
+            rows = conn.execute(sql, tuple(params)).fetchall()
+            seen = {(row[1], row[2]) for row in rows}
+            results = list(rows)
+        except sqlite3.OperationalError:
+            # If FTS5 fails (e.g., due to syntax issues), fall back to empty results for FTS
+            rows = []
+            seen = set()
+            results = []
+
         like_pattern = f"%{norm}%"
         if norm and len(norm) >= 2:
             like_sql = "SELECT tag, norm, kind, COUNT(DISTINCT image_id) AS freq FROM tags WHERE norm LIKE ?"
             like_params: List[object] = [like_pattern]
-            if kind_filter in (
+            if extracted_kind_filter in (
                 "prompt",
                 "negative",
                 "character",
@@ -161,7 +272,7 @@ def autocomplete_tags(
                 "rating",
             ):
                 like_sql += " AND kind = ?"
-                like_params.append(kind_filter)
+                like_params.append(extracted_kind_filter)
             like_sql += " GROUP BY norm, kind ORDER BY freq DESC LIMIT ?"
             like_params.append(limit * 2)
             for row in conn.execute(like_sql, tuple(like_params)):

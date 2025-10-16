@@ -1,190 +1,374 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Danbooru-lite</title>
-<link rel="stylesheet" href="app.css">
-</head>
-<body>
-<header class="app-header">
-  <div class="search-row">
-    <div class="search-field" data-role="tag-search">
-      <label for="search" class="sr-only">Primary tag search</label>
-      <input type="search" id="search" placeholder="Search tags… (!tag or -tag to exclude, uc:tag for negative prompts)" autocomplete="off">
-      <button type="button" class="input-action" id="search-clear" aria-label="Clear tag search">×</button>
-    </div>
-    <div class="search-field" data-role="clip-search">
-      <label for="clip-query" class="sr-only">CLIP search</label>
-      <input type="text" id="clip-query" placeholder="CLIP search…" autocomplete="off">
-      <button type="button" class="input-action" id="clip-clear" aria-label="Clear CLIP search">×</button>
-    </div>
-  </div>
-  <div class="header-actions">
-    <span id="status"></span>
-    <button id="sidebar-toggle" class="icon-button" type="button" aria-label="Toggle status sidebar">
-      <span class="gear-icon" aria-hidden="true">⚙</span>
-    </button>
-  </div>
-</header>
-<div id="toast-stack" class="toast-stack" aria-live="polite"></div>
-<main>
-  <div class="content">
-    <div class="grid" id="grid"></div>
-    <button id="load-more" type="button">Load more</button>
-    <div id="scroll-sentinel" aria-hidden="true"></div>
-  </div>
-  <aside id="sidebar" aria-label="Status and tag filters">
-    <div id="status-wrapper">
-      <div class="sidebar-card" id="status-card">
-        <div class="sidebar-card-header">
-          <span class="sidebar-card-title">Background Status</span>
-        </div>
-        <div class="status-section" id="clip-status">
-        <div class="status-section-heading">
-          <span>CLIP Indexer</span>
-          <button id="clip-toggle" class="pill-button status-toggle" type="button" hidden aria-label="Pause CLIP indexer">
-            <span class="status-icon" aria-hidden="true">⏸</span>
-            <span class="status-toggle-label sr-only">Pause CLIP indexer</span>
-          </button>
-        </div>
-        <div class="progress-track">
-          <div class="progress-bar" id="clip-progress-bar"></div>
-        </div>
-        <div class="status-meta" id="clip-summary">CLIP status unavailable</div>
-        </div>
-        <div class="status-section" id="auto-status">
-          <div class="status-section-heading">
-            <span>Auto Tagger</span>
-            <button id="auto-toggle" class="pill-button status-toggle" type="button" hidden aria-label="Pause auto tagger">
-              <span class="status-icon" aria-hidden="true">⏸</span>
-              <span class="status-toggle-label sr-only">Pause auto tagger</span>
-            </button>
-          </div>
-          <div class="progress-track">
-            <div class="progress-bar" id="auto-progress-bar"></div>
-          </div>
-          <div class="status-meta" id="auto-summary">Auto-tag status unavailable</div>
-          <ul class="status-errors" id="auto-errors"></ul>
-      </div>
-    </div>
-    </div>
-    <div class="sidebar-card" id="tags-card">
-      <div class="sidebar-card-header">
-        <span class="sidebar-card-title">Tags</span>
-        <button id="toggle-uc" class="pill-toggle" type="button" aria-pressed="true">UC Hidden</button>
-      </div>
-      <ul id="facet-tags"></ul>
-    </div>
-    <div class="sidebar-card" id="rating-card">
-      <div class="sidebar-card-header">
-        <span class="sidebar-card-title">Rating Filter</span>
-      </div>
-      <div class="rating-filters">
-        <label class="rating-filter" data-rating="general">
-          <input type="checkbox" value="general" checked>
-          <span class="rating-option">
-            <span class="rating-name">General</span>
-            <span class="rating-count">0</span>
-          </span>
-        </label>
-        <label class="rating-filter" data-rating="sensitive">
-          <input type="checkbox" value="sensitive" checked>
-          <span class="rating-option">
-            <span class="rating-name">Sensitive</span>
-            <span class="rating-count">0</span>
-          </span>
-        </label>
-        <label class="rating-filter" data-rating="questionable">
-          <input type="checkbox" value="questionable" checked>
-          <span class="rating-option">
-            <span class="rating-name">Questionable</span>
-            <span class="rating-count">0</span>
-          </span>
-        </label>
-        <label class="rating-filter" data-rating="explicit">
-          <input type="checkbox" value="explicit">
-          <span class="rating-option">
-            <span class="rating-name">Explicit</span>
-            <span class="rating-count">0</span>
-          </span>
-        </label>
-      </div>
-    </div>
-  </aside>
-</main>
-<ul id="tag-suggestions" role="listbox" aria-label="Tag suggestions"></ul>
-<div id="detail-overlay" aria-hidden="true">
-  <div id="detail-card" role="dialog" aria-modal="true" aria-labelledby="detail-title">
-    <button id="detail-close" class="detail-close" type="button" aria-label="Close detail">×</button>
-    <div class="detail-header">
-      <button id="detail-similar" class="detail-similar" type="button" title="Find similar via CLIP" aria-label="Find similar via CLIP">≈</button>
-      <h2 id="detail-title"></h2>
-    </div>
-    <div class="detail-body">
-      <div class="detail-image">
-        <img id="detail-image" alt="Selected artwork">
-        <div id="detail-hotspots"></div>
-        <div class="detail-footer">
-          <button id="detail-prev" type="button" aria-label="Previous image">← Previous</button>
-          <span id="detail-counter"></span>
-          <button id="detail-next" type="button" aria-label="Next image">Next →</button>
-        </div>
-      </div>
-      <div class="detail-meta">
-        <div class="detail-section info" id="detail-info"></div>
-        <div class="detail-section rating" id="detail-rating">
-          <span class="rating-label"></span>
-          <div class="rating-bars" id="rating-bars"></div>
-        </div>
-        <div class="detail-section" id="detail-copy">
-          <h3>Copy Tags</h3>
-          <div class="copy-grid">
-            <button class="copy-action" id="copy-all-nai" type="button" disabled>All • NAI</button>
-            <button class="copy-action" id="copy-all-danbooru" type="button" disabled>All • Danbooru</button>
-            <button class="copy-action" id="copy-embedded-nai" type="button" disabled>Embedded • NAI</button>
-            <button class="copy-action" id="copy-embedded-danbooru" type="button" disabled>Embedded • Danbooru</button>
-            <button class="copy-action" id="copy-auto-nai" type="button" disabled>Auto • NAI</button>
-            <button class="copy-action" id="copy-auto-danbooru" type="button" disabled>Auto • Danbooru</button>
-          </div>
-        </div>
-        <div class="detail-section">
-          <h3>Tags</h3>
-          <div class="tag-pills" id="detail-tags"></div>
-        </div>
-        <div class="detail-section prompts" id="detail-prompts">
-          <div class="prompt-block" id="prompt-positive-block">
-            <div class="prompt-heading">
-              <span>Positive Prompt</span>
-              <button class="copy-btn" id="copy-positive" type="button" aria-label="Copy positive prompt" title="Copy positive prompt"><span class="sr-only">Copy positive prompt</span>📋</button>
+    <head>
+        <meta charset="utf-8" />
+        <title>Danbooru-lite</title>
+        <link rel="stylesheet" href="app.css" />
+    </head>
+    <body>
+        <header class="app-header">
+            <div class="search-row">
+                <div class="search-field" data-role="tag-search">
+                    <label for="search" class="sr-only"
+                        >Primary tag search</label
+                    >
+                    <input
+                        type="search"
+                        id="search"
+                        placeholder="Search tags… (!tag or -tag to exclude, uc:tag for negative prompts, path:*/folder/* for paths)"
+                        autocomplete="off"
+                    />
+                    <button
+                        type="button"
+                        class="input-action"
+                        id="search-clear"
+                        aria-label="Clear tag search"
+                    >
+                        ×
+                    </button>
+                </div>
+                <div class="search-field" data-role="clip-search">
+                    <label for="clip-query" class="sr-only">CLIP search</label>
+                    <input
+                        type="text"
+                        id="clip-query"
+                        placeholder="CLIP search…"
+                        autocomplete="off"
+                    />
+                    <button
+                        type="button"
+                        class="input-action"
+                        id="clip-clear"
+                        aria-label="Clear CLIP search"
+                    >
+                        ×
+                    </button>
+                </div>
             </div>
-            <p class="prompt-preview" id="positive-preview"></p>
-          </div>
-          <div class="prompt-block" id="prompt-negative-block">
-            <div class="prompt-heading">
-              <span>Negative Prompt</span>
-              <button class="copy-btn" id="copy-negative" type="button" aria-label="Copy negative prompt" title="Copy negative prompt"><span class="sr-only">Copy negative prompt</span>📋</button>
+            <div class="header-actions">
+                <span id="status"></span>
+                <button
+                    id="sidebar-toggle"
+                    class="icon-button"
+                    type="button"
+                    aria-label="Toggle status sidebar"
+                >
+                    <span class="gear-icon" aria-hidden="true">⚙</span>
+                </button>
             </div>
-            <p class="prompt-preview" id="negative-preview"></p>
-          </div>
+        </header>
+        <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+        <main>
+            <div class="content">
+                <div class="grid" id="grid"></div>
+                <button id="load-more" type="button">Load more</button>
+                <div id="scroll-sentinel" aria-hidden="true"></div>
+            </div>
+            <aside id="sidebar" aria-label="Status and tag filters">
+                <div id="status-wrapper">
+                    <div class="sidebar-card" id="status-card">
+                        <div class="sidebar-card-header">
+                            <span class="sidebar-card-title"
+                                >Background Status</span
+                            >
+                        </div>
+                        <div class="status-section" id="clip-status">
+                            <div class="status-section-heading">
+                                <span>CLIP Indexer</span>
+                                <button
+                                    id="clip-toggle"
+                                    class="pill-button status-toggle"
+                                    type="button"
+                                    hidden
+                                    aria-label="Pause CLIP indexer"
+                                >
+                                    <span class="status-icon" aria-hidden="true"
+                                        >⏸</span
+                                    >
+                                    <span class="status-toggle-label sr-only"
+                                        >Pause CLIP indexer</span
+                                    >
+                                </button>
+                            </div>
+                            <div class="progress-track">
+                                <div
+                                    class="progress-bar"
+                                    id="clip-progress-bar"
+                                ></div>
+                            </div>
+                            <div class="status-meta" id="clip-summary">
+                                CLIP status unavailable
+                            </div>
+                        </div>
+                        <div class="status-section" id="auto-status">
+                            <div class="status-section-heading">
+                                <span>Auto Tagger</span>
+                                <button
+                                    id="auto-toggle"
+                                    class="pill-button status-toggle"
+                                    type="button"
+                                    hidden
+                                    aria-label="Pause auto tagger"
+                                >
+                                    <span class="status-icon" aria-hidden="true"
+                                        >⏸</span
+                                    >
+                                    <span class="status-toggle-label sr-only"
+                                        >Pause auto tagger</span
+                                    >
+                                </button>
+                            </div>
+                            <div class="progress-track">
+                                <div
+                                    class="progress-bar"
+                                    id="auto-progress-bar"
+                                ></div>
+                            </div>
+                            <div class="status-meta" id="auto-summary">
+                                Auto-tag status unavailable
+                            </div>
+                            <ul class="status-errors" id="auto-errors"></ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="sidebar-card" id="tags-card">
+                    <div class="sidebar-card-header">
+                        <span class="sidebar-card-title">Tags</span>
+                        <button
+                            id="toggle-uc"
+                            class="pill-toggle"
+                            type="button"
+                            aria-pressed="true"
+                        >
+                            UC Hidden
+                        </button>
+                    </div>
+                    <ul id="facet-tags"></ul>
+                </div>
+                <div class="sidebar-card" id="rating-card">
+                    <div class="sidebar-card-header">
+                        <span class="sidebar-card-title">Rating Filter</span>
+                    </div>
+                    <div class="rating-filters">
+                        <label class="rating-filter" data-rating="general">
+                            <input type="checkbox" value="general" checked />
+                            <span class="rating-option">
+                                <span class="rating-name">General</span>
+                                <span class="rating-count">0</span>
+                            </span>
+                        </label>
+                        <label class="rating-filter" data-rating="sensitive">
+                            <input type="checkbox" value="sensitive" checked />
+                            <span class="rating-option">
+                                <span class="rating-name">Sensitive</span>
+                                <span class="rating-count">0</span>
+                            </span>
+                        </label>
+                        <label class="rating-filter" data-rating="questionable">
+                            <input
+                                type="checkbox"
+                                value="questionable"
+                                checked
+                            />
+                            <span class="rating-option">
+                                <span class="rating-name">Questionable</span>
+                                <span class="rating-count">0</span>
+                            </span>
+                        </label>
+                        <label class="rating-filter" data-rating="explicit">
+                            <input type="checkbox" value="explicit" />
+                            <span class="rating-option">
+                                <span class="rating-name">Explicit</span>
+                                <span class="rating-count">0</span>
+                            </span>
+                        </label>
+                    </div>
+                </div>
+            </aside>
+        </main>
+        <ul
+            id="tag-suggestions"
+            role="listbox"
+            aria-label="Tag suggestions"
+        ></ul>
+        <div id="detail-overlay" aria-hidden="true">
+            <div
+                id="detail-card"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="detail-title"
+            >
+                <button
+                    id="detail-close"
+                    class="detail-close"
+                    type="button"
+                    aria-label="Close detail"
+                >
+                    ×
+                </button>
+                <div class="detail-header">
+                    <button
+                        id="detail-similar"
+                        class="detail-similar"
+                        type="button"
+                        title="Find similar via CLIP"
+                        aria-label="Find similar via CLIP"
+                    >
+                        ≈
+                    </button>
+                    <h2 id="detail-title"></h2>
+                </div>
+                <div class="detail-body">
+                    <div class="detail-image">
+                        <img id="detail-image" alt="Selected artwork" />
+                        <div id="detail-hotspots"></div>
+                        <div class="detail-footer">
+                            <button
+                                id="detail-prev"
+                                type="button"
+                                aria-label="Previous image"
+                            >
+                                ← Previous
+                            </button>
+                            <span id="detail-counter"></span>
+                            <button
+                                id="detail-next"
+                                type="button"
+                                aria-label="Next image"
+                            >
+                                Next →
+                            </button>
+                        </div>
+                    </div>
+                    <div class="detail-meta">
+                        <div class="detail-section info" id="detail-info"></div>
+                        <div class="detail-section rating" id="detail-rating">
+                            <span class="rating-label"></span>
+                            <div class="rating-bars" id="rating-bars"></div>
+                        </div>
+                        <div class="detail-section" id="detail-copy">
+                            <h3>Copy Tags</h3>
+                            <div class="copy-grid">
+                                <button
+                                    class="copy-action"
+                                    id="copy-all-nai"
+                                    type="button"
+                                    disabled
+                                >
+                                    All • NAI
+                                </button>
+                                <button
+                                    class="copy-action"
+                                    id="copy-all-danbooru"
+                                    type="button"
+                                    disabled
+                                >
+                                    All • Danbooru
+                                </button>
+                                <button
+                                    class="copy-action"
+                                    id="copy-embedded-nai"
+                                    type="button"
+                                    disabled
+                                >
+                                    Embedded • NAI
+                                </button>
+                                <button
+                                    class="copy-action"
+                                    id="copy-embedded-danbooru"
+                                    type="button"
+                                    disabled
+                                >
+                                    Embedded • Danbooru
+                                </button>
+                                <button
+                                    class="copy-action"
+                                    id="copy-auto-nai"
+                                    type="button"
+                                    disabled
+                                >
+                                    Auto • NAI
+                                </button>
+                                <button
+                                    class="copy-action"
+                                    id="copy-auto-danbooru"
+                                    type="button"
+                                    disabled
+                                >
+                                    Auto • Danbooru
+                                </button>
+                            </div>
+                        </div>
+                        <div class="detail-section">
+                            <h3>Tags</h3>
+                            <div class="tag-pills" id="detail-tags"></div>
+                        </div>
+                        <div class="detail-section prompts" id="detail-prompts">
+                            <div
+                                class="prompt-block"
+                                id="prompt-positive-block"
+                            >
+                                <div class="prompt-heading">
+                                    <span>Positive Prompt</span>
+                                    <button
+                                        class="copy-btn"
+                                        id="copy-positive"
+                                        type="button"
+                                        aria-label="Copy positive prompt"
+                                        title="Copy positive prompt"
+                                    >
+                                        <span class="sr-only"
+                                            >Copy positive prompt</span
+                                        >📋
+                                    </button>
+                                </div>
+                                <p
+                                    class="prompt-preview"
+                                    id="positive-preview"
+                                ></p>
+                            </div>
+                            <div
+                                class="prompt-block"
+                                id="prompt-negative-block"
+                            >
+                                <div class="prompt-heading">
+                                    <span>Negative Prompt</span>
+                                    <button
+                                        class="copy-btn"
+                                        id="copy-negative"
+                                        type="button"
+                                        aria-label="Copy negative prompt"
+                                        title="Copy negative prompt"
+                                    >
+                                        <span class="sr-only"
+                                            >Copy negative prompt</span
+                                        >📋
+                                    </button>
+                                </div>
+                                <p
+                                    class="prompt-preview"
+                                    id="negative-preview"
+                                ></p>
+                            </div>
+                        </div>
+                        <div class="detail-section" id="detail-char-section">
+                            <h3>Character Prompts</h3>
+                            <div class="char-list" id="detail-characters"></div>
+                        </div>
+                        <div class="detail-section" id="detail-neg-section">
+                            <h3>Undesired (uc)</h3>
+                            <div class="tag-pills" id="detail-neg-tags"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
-        <div class="detail-section" id="detail-char-section">
-          <h3>Character Prompts</h3>
-          <div class="char-list" id="detail-characters"></div>
+        <div id="drop-overlay">
+            <div class="drop-message">
+                <strong>Drop image</strong>
+                <span>to find similar results</span>
+            </div>
         </div>
-        <div class="detail-section" id="detail-neg-section">
-          <h3>Undesired (uc)</h3>
-          <div class="tag-pills" id="detail-neg-tags"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-<div id="drop-overlay">
-  <div class="drop-message">
-    <strong>Drop image</strong>
-    <span>to find similar results</span>
-  </div>
-</div>
-<script src="app.js"></script>
-</body>
+        <script src="app.js"></script>
+    </body>
 </html>

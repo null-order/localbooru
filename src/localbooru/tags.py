@@ -1,4 +1,5 @@
 """Tag parsing utilities for LocalBooru."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -148,9 +149,9 @@ def _parse_prompt_token(
 
     local_weight = weight_factor
     if strong:
-        local_weight *= 1.1 ** strong
+        local_weight *= 1.1**strong
     if weak:
-        local_weight *= 0.9 ** weak
+        local_weight *= 0.9**weak
 
     emphasis: Optional[str] = inherited_emphasis
     if strong and not weak:
@@ -183,7 +184,9 @@ def _parse_prompt_token(
         token = weighted_match.group(2).strip()
         emphasis = "weighted"
         try:
-            numeric_value = float(numeric_str) if numeric_str not in {"", "+", "-"} else 1.0
+            numeric_value = (
+                float(numeric_str) if numeric_str not in {"", "+", "-"} else 1.0
+            )
         except ValueError:
             numeric_value = 1.0
         local_weight *= numeric_value
@@ -305,7 +308,9 @@ def load_comment_metadata(chunks: Dict[str, str]) -> Dict[str, object]:
         return {}
 
 
-def collect_tags(chunks: Dict[str, str]) -> Tuple[List[TagRecord], Optional[str], Dict[str, object]]:
+def collect_tags(
+    chunks: Dict[str, str],
+) -> Tuple[List[TagRecord], Optional[str], Dict[str, object]]:
     comment_meta = load_comment_metadata(chunks)
     prompt_sources: List[Tuple[str, str]] = []
     description_text: Optional[str] = None
@@ -407,11 +412,23 @@ def parse_query_tokens(query: str) -> List[Tuple[str, str, bool]]:
         elif lowered.startswith("rating:"):
             kind = "rating"
             token = token[7:].strip()
+        elif lowered.startswith("path:"):
+            kind = "path"
+            token = token[5:].strip()
+        elif lowered.startswith("in:"):
+            kind = "path"
+            token = token[3:].strip()
         while token.startswith(("-", "!")):
             exclude = True
             token = token[1:].strip()
-        norm = normalize_tag(token)
-        if not norm:
-            continue
-        tokens.append((norm, kind, exclude))
+        if kind == "path":
+            # For path searches, don't normalize - preserve the original pattern
+            if not token:
+                continue
+            tokens.append((token, kind, exclude))
+        else:
+            norm = normalize_tag(token)
+            if not norm:
+                continue
+            tokens.append((norm, kind, exclude))
     return tokens

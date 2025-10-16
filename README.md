@@ -90,6 +90,35 @@ Use `localbooru --status` (or the new spinning gear menu in the UI) to inspect b
 
 On the detail view you'll now see status chips for CLIP/Tag state, plus auto-generated prompts (with NovelAI and Danbooru copy buttons) whenever an image only has WD14-sourced tags.
 
+## Tag search & filtering
+
+The main search box supports tag-based queries with the following syntax:
+
+- **Basic tags**: `cat, dog, forest` - finds images containing these tags
+- **Negative tags**: `-cat, !dog` - excludes images with these tags  
+- **Tag types**: 
+  - `prompt:cat` - search in prompt tags only
+  - `char:alice` or `character:alice` - search character tags
+  - `uc:watermark` - search negative prompt tags
+  - `rating:safe` - search rating tags
+- **Path search**:
+  - `path:Downloads` - find files with paths containing "Downloads"
+  - `path:birds/` - find files in any "birds" directory  
+  - `path:/home/user/Images/*` - explicit wildcards for exact patterns
+  - `path:*/temp/*` - explicit directory matching
+  - `in:Downloads` - alias for path search
+  - `-path:temp` - exclude paths containing "temp"
+
+Path patterns support:
+- Auto-wildcards: `path:pol` becomes `*pol*` (contains "pol")
+- Directory search: `path:birds/` becomes `*/birds/*` (birds directory)
+- Explicit wildcards: `path:*pol*` stays as-is (user controls pattern)
+- `*` matches any characters, `?` matches single characters
+- Absolute paths are normalized relative to configured roots
+- Case-sensitive matching
+
+Multiple search terms are combined with AND logic. Separate terms with commas or newlines.
+
 ## CLIP search & similarity
 
 - Use the "CLIP search…" box in the header to run semantic text queries; active tag filters still apply so you can mix both worlds.
