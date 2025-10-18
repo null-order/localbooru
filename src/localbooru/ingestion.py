@@ -11,14 +11,37 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 from .auto_tagging import AutoTaggingUnavailable, generate_wd14_tags
 from .config import LocalBooruConfig
 from .database import LocalBooruDatabase
-from .tags import TagRecord, collect_tags, merge_tag_records, read_png_metadata
+from .enhanced_metadata import (
+    extract_enhanced_metadata,
+    metadata_to_dict,
+    get_prompt_tags_from_metadata,
+)
+from .tags import TagRecord, collect_tags, merge_tag_records, read_image_metadata
 
 if TYPE_CHECKING:
     from .scanner import ScanProgress
 
 LOGGER = logging.getLogger(__name__)
 
-PNG_PATTERNS: Sequence[str] = ("*.png", "*.PNG")
+# Supported image file patterns - PNG first for NovelAI metadata priority
+IMAGE_PATTERNS: Sequence[str] = (
+    "*.png",
+    "*.PNG",  # Primary: NovelAI PNGs with metadata
+    "*.jpg",
+    "*.JPG",  # Common JPEG formats
+    "*.jpeg",
+    "*.JPEG",  # Alternative JPEG extension
+    "*.webp",
+    "*.WEBP",  # Modern WebP format
+    "*.gif",
+    "*.GIF",  # GIF format
+    "*.bmp",
+    "*.BMP",  # Bitmap format
+    "*.tiff",
+    "*.TIFF",  # TIFF format
+    "*.tga",
+    "*.TGA",  # TGA format
+)
 
 
 @dataclass
@@ -94,9 +117,18 @@ def ingest_path(
         )
         comment_meta = {}
         chunks = {}
+        enhanced_metadata = None
     else:
-        chunks = read_png_metadata(path)
-        tags, description_text, comment_meta = collect_tags(chunks)
+        # Use enhanced metadata extraction with sd-parsers
+        enhanced_metadata = extract_enhanced_metadata(path)
+
+        # Get tags from enhanced metadata or fallback to legacy parsing
+        tags = get_prompt_tags_from_metadata(enhanced_metadata)
+        description_text = enhanced_metadata.description
+        comment_meta = enhanced_metadata.comment_meta or {}
+
+        # For backward compatibility, also populate chunks
+        chunks = enhanced_metadata.raw_chunks or {}
 
     auto_enabled = config.auto_tag_missing
     auto_mode = (config.auto_tag_mode or "missing").lower()
@@ -110,9 +142,7 @@ def ingest_path(
         else:
             missing_auto_rating = True
         should_generate = (
-            auto_mode == "augment"
-            or not manual_tags_present
-            or missing_auto_rating
+            auto_mode == "augment" or not manual_tags_present or missing_auto_rating
         )
         if should_generate:
             try:
@@ -136,20 +166,47 @@ def ingest_path(
     if not unchanged:
         if auto_tags:
             tags = merge_tag_records(tags, auto_tags)
-        width = _safe_int(chunks.get("Width") or comment_meta.get("width"))
-        height = _safe_int(chunks.get("Height") or comment_meta.get("height"))
-        seed = comment_meta.get("seed")
-        model = (
-            comment_meta.get("Source")
-            or comment_meta.get("source")
-            or chunks.get("Source")
-        )
-        source = (
-            chunks.get("Source")
-            or comment_meta.get("Source")
-            or comment_meta.get("source")
-        )
-        metadata_blob = json.dumps(comment_meta) if comment_meta else None
+
+        # Use enhanced metadata if available, otherwise fall back to legacy extraction
+        if enhanced_metadata:
+            metadata_dict = metadata_to_dict(enhanced_metadata)
+            width = enhanced_metadata.width or _safe_int(
+                chunks.get("Width") or comment_meta.get("width")
+            )
+            height = enhanced_metadata.height or _safe_int(
+                chunks.get("Height") or comment_meta.get("height")
+            )
+            seed = enhanced_metadata.seed or comment_meta.get("seed")
+            model = (
+                enhanced_metadata.model
+                or comment_meta.get("Source")
+                or comment_meta.get("source")
+                or chunks.get("Source")
+            )
+            source = (
+                enhanced_metadata.source
+                or chunks.get("Source")
+                or comment_meta.get("Source")
+                or comment_meta.get("source")
+            )
+            metadata_blob = metadata_dict.get("metadata_json")
+        else:
+            # Legacy fallback
+            width = _safe_int(chunks.get("Width") or comment_meta.get("width"))
+            height = _safe_int(chunks.get("Height") or comment_meta.get("height"))
+            seed = comment_meta.get("seed")
+            model = (
+                comment_meta.get("Source")
+                or comment_meta.get("source")
+                or chunks.get("Source")
+            )
+            source = (
+                chunks.get("Source")
+                or comment_meta.get("Source")
+                or comment_meta.get("source")
+            )
+            metadata_blob = json.dumps(comment_meta) if comment_meta else None
+
         image_id, changed = db.upsert_image_record(
             rel_path=rel_path,
             name=path.name,
@@ -163,6 +220,15 @@ def ingest_path(
             description=description_text,
             metadata_json=metadata_blob,
             tags=tags,
+            generator=enhanced_metadata.generator if enhanced_metadata else None,
+            prompt=enhanced_metadata.prompt if enhanced_metadata else None,
+            negative_prompt=enhanced_metadata.negative_prompt
+            if enhanced_metadata
+            else None,
+            steps=enhanced_metadata.steps if enhanced_metadata else None,
+            cfg_scale=enhanced_metadata.cfg_scale if enhanced_metadata else None,
+            sampler=enhanced_metadata.sampler if enhanced_metadata else None,
+            scheduler=enhanced_metadata.scheduler if enhanced_metadata else None,
         )
     else:
         image_id = existing["id"]
@@ -192,10 +258,10 @@ def ingest_path(
                 job_status = "ready"
             else:
                 needs_job = False
-                if auto_mode == "augment":
-                    if changed:
-                        needs_job = True
-                    elif missing_auto_rating:
+                if job_status in {"ready", "skipped"} and not changed:
+                    needs_job = False
+                elif auto_mode == "augment":
+                    if changed or missing_auto_rating:
                         needs_job = True
                     elif (
                         job_status in {None, "pending", "processing", "error"}
@@ -272,7 +338,7 @@ def _safe_int(value: object) -> Optional[int]:
         return None
 
 
-def scan_pngs(
+def scan_images(
     db: LocalBooruDatabase,
     config: LocalBooruConfig,
     *,
@@ -288,7 +354,9 @@ def scan_pngs(
         tagged_ids = db.load_auto_tagged_ids()
         context = IngestAutoContext(jobs=jobs, auto_tagged=tagged_ids)
     for root in roots:
-        for pattern in PNG_PATTERNS:
+        # Use configurable image patterns from config
+        patterns = getattr(config, "image_patterns", IMAGE_PATTERNS)
+        for pattern in patterns:
             for path in Path(root).rglob(pattern):
                 key = path.as_posix()
                 if key in seen_candidates:
@@ -309,7 +377,10 @@ def scan_pngs(
                 rel_path = path.relative_to(config.root).as_posix()
             except ValueError:
                 rel_path = path.as_posix()
-            observed_paths.add(rel_path)
+                observed_paths.add(rel_path)
+            else:
+                observed_paths.add(rel_path)
+                observed_paths.add(path.as_posix())
         except Exception as exc:  # pragma: no cover - defensive
             encountered_error = True
             LOGGER.exception("Failed to ingest %s: %s", path, exc)

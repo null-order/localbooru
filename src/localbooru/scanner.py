@@ -1,4 +1,5 @@
-"""Filesystem scanner for NovelAI PNGs."""
+"""Filesystem scanner for images."""
+
 from __future__ import annotations
 
 import logging
@@ -7,10 +8,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from pathlib import Path
+
 from .config import LocalBooruConfig
 from .clip import ClipProgress
 from .database import LocalBooruDatabase
-from .ingestion import scan_pngs
+from .ingestion import scan_images
 
 
 LOGGER = logging.getLogger(__name__)
@@ -26,7 +29,9 @@ class ScanProgress:
     started_at: Optional[float] = None
     last_update: Optional[float] = None
     history: List[tuple[float, int]] = field(default_factory=list)
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
 
     def begin(self, total: int) -> None:
         with self._lock:
@@ -119,7 +124,7 @@ class Scanner(threading.Thread):
     def run_once(self) -> None:
         roots_display = ", ".join(str(path) for path in self.config.roots)
         LOGGER.info("Running filesystem scan for %s", roots_display)
-        scan_pngs(self.db, self.config, progress=self.scan_progress)
+        scan_images(self.db, self.config, progress=self.scan_progress)
         LOGGER.info(
             "Scan complete (%d processed, %d errors)",
             self.scan_progress.processed,
@@ -153,6 +158,40 @@ class Scanner(threading.Thread):
     def trigger_scan(self) -> None:
         """Request that the scanner perform another pass soon."""
         self._rescan_event.set()
+
+    def incremental_ingest(self, path: Path) -> None:
+        """Ingest a single file path incrementally."""
+        from .ingestion import IngestAutoContext, ingest_path
+
+        context: Optional[IngestAutoContext] = None
+        if self.config.auto_tag_missing:
+            jobs = self.db.load_auto_tag_jobs()
+            tagged_ids = self.db.load_auto_tagged_ids()
+            context = IngestAutoContext(jobs=jobs, auto_tagged=tagged_ids)
+
+        try:
+            image_id = ingest_path(self.db, self.config, path, context=context)
+            if image_id is not None:
+                LOGGER.info("Incrementally ingested %s (ID %d)", path, image_id)
+        except Exception as exc:
+            LOGGER.exception("Failed to incrementally ingest %s: %s", path, exc)
+
+    def mark_deleted(self, path: Path) -> None:
+        """Mark a file as deleted (for incremental deletions)."""
+        try:
+            rel_path = path.relative_to(self.config.root).as_posix()
+        except ValueError:
+            rel_path = path.as_posix()
+        conn = self.db.connection
+        with conn:
+            deleted_count = conn.execute(
+                "DELETE FROM images WHERE path = ?",
+                (rel_path,),
+            ).rowcount
+        if deleted_count > 0:
+            LOGGER.info("Marked %s as deleted (%d rows)", path, deleted_count)
+        else:
+            LOGGER.debug("No image found for deleted path %s", path)
 
     def stop(self) -> None:
         self._stop_event.set()

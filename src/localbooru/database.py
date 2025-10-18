@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from contextlib import closing
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 from .tags import TagRecord
+
+LOGGER = logging.getLogger(__name__)
 
 BUSY_TIMEOUT_MS = 5000
 
@@ -94,12 +97,10 @@ SCHEMA_STATEMENTS = [
     "    VALUES (new.id, new.norm, new.tag, new.kind, new.image_id);\n"
     "END;",
     "CREATE TRIGGER IF NOT EXISTS tags_ad AFTER DELETE ON tags BEGIN\n"
-    "    INSERT INTO tag_index(tag_index, rowid, norm, tag, kind, image_id)\n"
-    "    VALUES ('delete', old.id, old.norm, old.tag, old.kind, old.image_id);\n"
+    "    DELETE FROM tag_index WHERE rowid = old.id;\n"
     "END;",
     "CREATE TRIGGER IF NOT EXISTS tags_au AFTER UPDATE ON tags BEGIN\n"
-    "    INSERT INTO tag_index(tag_index, rowid, norm, tag, kind, image_id)\n"
-    "    VALUES ('delete', old.id, old.norm, old.tag, old.kind, old.image_id);\n"
+    "    DELETE FROM tag_index WHERE rowid = old.id;\n"
     "    INSERT INTO tag_index(rowid, norm, tag, kind, image_id)\n"
     "    VALUES (new.id, new.norm, new.tag, new.kind, new.image_id);\n"
     "END;",
@@ -111,6 +112,7 @@ class LocalBooruDatabase:
         self.path = Path(path)
         self._connection = self.new_connection()
         self._ensure_schema()
+        self._ensure_tag_index_schema()
 
     def close(self) -> None:
         self._connection.close()
@@ -151,6 +153,22 @@ class LocalBooruDatabase:
                 cur.execute("ALTER TABLE images ADD COLUMN rating_confidence REAL")
             if "rating_updated" not in cols:
                 cur.execute("ALTER TABLE images ADD COLUMN rating_updated REAL")
+
+            # Enhanced metadata fields for AI generation info
+            if "generator" not in cols:
+                cur.execute("ALTER TABLE images ADD COLUMN generator TEXT")
+            if "prompt" not in cols:
+                cur.execute("ALTER TABLE images ADD COLUMN prompt TEXT")
+            if "negative_prompt" not in cols:
+                cur.execute("ALTER TABLE images ADD COLUMN negative_prompt TEXT")
+            if "steps" not in cols:
+                cur.execute("ALTER TABLE images ADD COLUMN steps INTEGER")
+            if "cfg_scale" not in cols:
+                cur.execute("ALTER TABLE images ADD COLUMN cfg_scale REAL")
+            if "sampler" not in cols:
+                cur.execute("ALTER TABLE images ADD COLUMN sampler TEXT")
+            if "scheduler" not in cols:
+                cur.execute("ALTER TABLE images ADD COLUMN scheduler TEXT")
             tag_cols = {row[1] for row in cur.execute("PRAGMA table_info(tags)")}
             if "source" not in tag_cols:
                 cur.execute(
@@ -166,6 +184,45 @@ class LocalBooruDatabase:
             if "scores_json" not in rating_job_cols:
                 cur.execute("ALTER TABLE rating_jobs ADD COLUMN scores_json TEXT")
             self._connection.commit()
+
+    def _ensure_tag_index_schema(self) -> None:
+        """Ensure the tag_index FTS table matches the expected schema."""
+        try:
+            row = self._connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='tag_index'"
+            ).fetchone()
+        except sqlite3.Error as exc:  # pragma: no cover - defensive
+            LOGGER.warning("Unable to inspect tag_index schema: %s", exc)
+            return
+
+        expected_fragment = "norm,\n    tag,\n    kind UNINDEXED,\n    image_id UNINDEXED"
+        needs_rebuild = False
+        if row is None or not row["sql"]:
+            needs_rebuild = True
+        else:
+            sql_definition = row["sql"]
+            if "kind" not in sql_definition or "image_id" not in sql_definition:
+                needs_rebuild = True
+
+        if not needs_rebuild:
+            return
+
+        LOGGER.info("Rebuilding tag_index virtual table to match expected schema")
+        with self._connection:
+            self._connection.execute("DROP TABLE IF EXISTS tag_index")
+            self._connection.execute(
+                "CREATE VIRTUAL TABLE tag_index USING fts5(\n"
+                "    norm,\n"
+                "    tag,\n"
+                "    kind UNINDEXED,\n"
+                "    image_id UNINDEXED,\n"
+                "    tokenize=\"unicode61 tokenchars '_.:-'\"\n"
+                ");"
+            )
+            self._connection.execute(
+                "INSERT INTO tag_index(rowid, norm, tag, kind, image_id)\n"
+                "SELECT id, norm, tag, kind, image_id FROM tags"
+            )
 
     # --- Image + tag operations ---------------------------------------------------------
 
@@ -189,6 +246,13 @@ class LocalBooruDatabase:
         description: Optional[str],
         metadata_json: Optional[str],
         tags: Sequence[TagRecord],
+        generator: Optional[str] = None,
+        prompt: Optional[str] = None,
+        negative_prompt: Optional[str] = None,
+        steps: Optional[int] = None,
+        cfg_scale: Optional[float] = None,
+        sampler: Optional[str] = None,
+        scheduler: Optional[str] = None,
     ) -> Tuple[int, bool]:
         """Insert or update an image row plus tags.
 
@@ -208,12 +272,20 @@ class LocalBooruDatabase:
                 source,
                 description,
                 metadata_json,
+                generator,
+                prompt,
+                negative_prompt,
+                steps,
+                cfg_scale,
+                sampler,
+                scheduler,
             )
             if existing is None:
                 cur = self._connection.execute(
                     "INSERT INTO images "
-                    "(path, name, mtime, size, width, height, seed, model, source, description, metadata_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(path, name, mtime, size, width, height, seed, model, source, description, metadata_json, "
+                    "generator, prompt, negative_prompt, steps, cfg_scale, sampler, scheduler) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     row,
                 )
                 image_id = cur.lastrowid
@@ -221,9 +293,10 @@ class LocalBooruDatabase:
             else:
                 cur = self._connection.execute(
                     "UPDATE images SET "
-                    "name=?, mtime=?, size=?, width=?, height=?, seed=?, model=?, source=?, description=?, metadata_json=? "
+                    "name=?, mtime=?, size=?, width=?, height=?, seed=?, model=?, source=?, description=?, metadata_json=?, "
+                    "generator=?, prompt=?, negative_prompt=?, steps=?, cfg_scale=?, sampler=?, scheduler=? "
                     "WHERE path=?",
-                    (*row, rel_path),
+                    (*row[1:], rel_path),
                 )
                 image_id = existing["id"]
                 changed = cur.rowcount > 0
@@ -295,23 +368,73 @@ class LocalBooruDatabase:
         return image_id, changed
 
     def delete_missing_images(self, existing_paths: Iterable[str]) -> int:
-        existing = list(existing_paths)
-        if not existing:
-            return 0
+        """Delete images from the database that are not in the existing_paths set.
+
+        Args:
+            existing_paths: Iterable of image paths that should be kept
+
+        Returns:
+            Number of images deleted
+        """
+        keep_paths_raw: Set[str] = set()
+        keep_paths_normalized: Set[str] = set()
+        for raw in existing_paths:
+            if raw is None:
+                continue
+            candidate = raw.as_posix() if isinstance(raw, Path) else str(raw)
+            if candidate:
+                keep_paths_raw.add(candidate)
+                keep_paths_normalized.add(candidate.replace("\\", "/"))
+
+        LOGGER.debug(
+            "delete_missing_images evaluating %d known paths",
+            len(keep_paths_raw),
+        )
+
         with self._connection:
-            self._connection.execute(
-                "CREATE TEMP TABLE IF NOT EXISTS temp_keep_paths(path TEXT PRIMARY KEY)"
-            )
-            self._connection.execute("DELETE FROM temp_keep_paths")
-            self._connection.executemany(
-                "INSERT OR IGNORE INTO temp_keep_paths(path) VALUES (?)",
-                ((path,) for path in existing),
-            )
-            cur = self._connection.execute(
-                "DELETE FROM images WHERE path NOT IN (SELECT path FROM temp_keep_paths)"
-            )
-            deleted = cur.rowcount
-            self._connection.execute("DELETE FROM temp_keep_paths")
+            # If nothing should be kept, clear the table entirely.
+            if not keep_paths_raw:
+                cur = self._connection.execute("DELETE FROM images")
+                deleted = cur.rowcount if cur.rowcount != -1 else 0
+                return deleted
+
+            rows = self._connection.execute(
+                "SELECT id, path FROM images"
+            ).fetchall()
+            missing_rows: List[Tuple[int, str]] = []
+            for row in rows:
+                stored_path = row["path"]
+                normalized_path = stored_path.replace("\\", "/")
+                if stored_path in keep_paths_raw or normalized_path in keep_paths_normalized:
+                    continue
+                missing_rows.append((int(row["id"]), stored_path))
+
+            if not missing_rows:
+                return 0
+
+            if LOGGER.isEnabledFor(logging.DEBUG):
+                sample_paths = [path for _, path in missing_rows[:5]]
+                LOGGER.debug(
+                    "Deleting %d missing images; sample paths: %s",
+                    len(missing_rows),
+                    sample_paths,
+                )
+
+            deleted = 0
+            chunk_size = 512
+            for start in range(0, len(missing_rows), chunk_size):
+                chunk = missing_rows[start : start + chunk_size]
+                ids = [image_id for image_id, _ in chunk]
+                placeholders = ",".join("?" for _ in ids)
+                cur = self._connection.execute(
+                    f"DELETE FROM images WHERE id IN ({placeholders})",
+                    ids,
+                )
+                if cur.rowcount is None or cur.rowcount < 0:
+                    deleted += len(ids)
+                else:
+                    deleted += cur.rowcount
+
             return deleted
 
     # --- CLIP embedding operations ------------------------------------------------------
@@ -544,18 +667,28 @@ class LocalBooruDatabase:
         strategy: str,
         rating_scores: Optional[Dict[str, float]] = None,
     ) -> str:
-        conn = self.new_connection()
-        try:
-            with conn:
-                result = self._apply_auto_tags_internal(conn, image_id, tags, strategy)
-                normalized_scores = self._normalize_scores(rating_scores)
-                if normalized_scores:
-                    self._apply_rating_scores_internal(
-                        conn, image_id, normalized_scores
+        attempts = 0
+        while True:
+            conn = self.new_connection()
+            try:
+                with conn:
+                    result = self._apply_auto_tags_internal(
+                        conn, image_id, tags, strategy
                     )
-            return result
-        finally:
-            conn.close()
+                    normalized_scores = self._normalize_scores(rating_scores)
+                    if normalized_scores:
+                        self._apply_rating_scores_internal(
+                            conn, image_id, normalized_scores
+                        )
+                return result
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower() and attempts < 5:
+                    attempts += 1
+                    time.sleep(0.2 * attempts)
+                    continue
+                raise
+            finally:
+                conn.close()
 
     def _apply_auto_tags_internal(
         self,
@@ -586,7 +719,11 @@ class LocalBooruDatabase:
             if not to_add:
                 return "skipped"
         else:
-            to_add = [tag for tag in tags if tag.weight >= 0.0]
+            to_add = [
+                tag
+                for tag in tags
+                if tag.weight >= 0.0 and (tag.norm, tag.kind) not in existing_tags
+            ]
 
         if not to_add:
             return "skipped"
