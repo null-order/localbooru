@@ -75,6 +75,28 @@ def build_matched_cte(
                 "SELECT DISTINCT CAST(id AS INTEGER) FROM images WHERE path GLOB ?"
             )
             positive_params.append(normalized_pattern)
+        elif kind in ("generator", "model", "sampler", "scheduler", "seed"):
+            # Handle metadata field searches in images table
+            positive_clauses.append(
+                f"SELECT DISTINCT CAST(id AS INTEGER) FROM images WHERE {kind} LIKE ?"
+            )
+            positive_params.append(f"%{norm}%")
+        elif kind in ("steps", "cfg_scale"):
+            # Handle numeric metadata field searches
+            # First try to parse as float, handling normalized decimals
+            original_norm = norm.replace("_", ".")  # Convert normalized decimals back
+            try:
+                numeric_value = float(original_norm)
+                positive_clauses.append(
+                    f"SELECT DISTINCT CAST(id AS INTEGER) FROM images WHERE {kind} = ?"
+                )
+                positive_params.append(numeric_value)
+            except ValueError:
+                # If not numeric, treat as text search
+                positive_clauses.append(
+                    f"SELECT DISTINCT CAST(id AS INTEGER) FROM images WHERE CAST({kind} AS TEXT) LIKE ?"
+                )
+                positive_params.append(f"%{original_norm}%")
         else:
             match = f"norm:{_fts_quote(norm)}"
             if kind == "any":
@@ -98,6 +120,28 @@ def build_matched_cte(
                 "SELECT DISTINCT CAST(id AS INTEGER) FROM images WHERE path GLOB ?"
             )
             negative_params.append(normalized_pattern)
+        elif kind in ("generator", "model", "sampler", "scheduler", "seed"):
+            # Handle negative metadata field searches in images table
+            negative_clauses.append(
+                f"SELECT DISTINCT CAST(id AS INTEGER) FROM images WHERE {kind} LIKE ?"
+            )
+            negative_params.append(f"%{norm}%")
+        elif kind in ("steps", "cfg_scale"):
+            # Handle negative numeric metadata field searches
+            # First try to parse as float, handling normalized decimals
+            original_norm = norm.replace("_", ".")  # Convert normalized decimals back
+            try:
+                numeric_value = float(original_norm)
+                negative_clauses.append(
+                    f"SELECT DISTINCT CAST(id AS INTEGER) FROM images WHERE {kind} = ?"
+                )
+                negative_params.append(numeric_value)
+            except ValueError:
+                # If not numeric, treat as text search
+                negative_clauses.append(
+                    f"SELECT DISTINCT CAST(id AS INTEGER) FROM images WHERE CAST({kind} AS TEXT) LIKE ?"
+                )
+                negative_params.append(f"%{original_norm}%")
         else:
             match = f"norm:{_fts_quote(norm)}"
             if kind == "any":

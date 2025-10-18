@@ -16,6 +16,7 @@ dependencies = [
   "torchvision",
   "pywebview",
   "tomli; python_version < \"3.11\"",
+  "sd-parsers>=0.6.0",
 ]
 
 [project.optional-dependencies]
@@ -42,3 +43,6 @@ package-dir = {"" = "src"}
 packages = ["localbooru"]
 include-package-data = true
 package-data = {"localbooru" = ["frontend/index.html", "frontend/app.css", "frontend/app.js", "static/**", "templates/**"]}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

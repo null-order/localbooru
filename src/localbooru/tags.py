@@ -10,6 +10,13 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
+# JPEG file signatures
+JPEG_SIGNATURES = (
+    b"\xff\xd8\xff\xe0",  # JFIF
+    b"\xff\xd8\xff\xe1",  # EXIF
+    b"\xff\xd8\xff\xdb",  # Standard JPEG
+)
+
 
 @dataclasses.dataclass
 class TagRecord:
@@ -78,6 +85,13 @@ def _strip_balanced_wrappers(token: str) -> Tuple[str, int, int]:
             weak += 1
             current = stripped[1:-1]
             continue
+        # Add support for A1111/ComfyUI parentheses syntax
+        if len(stripped) >= 2 and stripped.startswith("(") and stripped.endswith(")"):
+            # Check if this is (tag:weight) syntax first
+            if not re.search(r":\s*[+-]?(?:\d*\.\d+|\d+)\s*$", stripped[1:-1]):
+                strong += 1
+                current = stripped[1:-1]
+                continue
         break
     return current.strip(), strong, weak
 
@@ -97,6 +111,10 @@ def _consume_leading_wrappers(token: str) -> Tuple[str, int, int]:
             weak += 1
             i += 1
             continue
+        if ch == "(":
+            strong += 1
+            i += 1
+            continue
         if ch.isspace():
             i += 1
             continue
@@ -108,7 +126,7 @@ def _consume_trailing_wrappers(token: str) -> str:
     end = len(token)
     while end > 0:
         ch = token[end - 1]
-        if ch in "}]":
+        if ch in "}])":
             end -= 1
             continue
         if ch.isspace():
@@ -118,8 +136,14 @@ def _consume_trailing_wrappers(token: str) -> str:
     return token[:end].rstrip()
 
 
+# NovelAI weight::tag:: syntax
 _weighted_prompt_re = re.compile(
     r"^([+-]?(?:\d*\.\d+|\d+)?)\s*::\s*(.*?)(?:\s*::\s*)?$"
+)
+
+# A1111/ComfyUI (tag:weight) syntax
+_paren_weighted_re = re.compile(
+    r"^\s*\(\s*(.*?)\s*:\s*([+-]?(?:\d*\.\d+|\d+))\s*\)\s*$"
 )
 
 
@@ -178,18 +202,31 @@ def _parse_prompt_token(
             )
         return records
 
-    weighted_match = _weighted_prompt_re.match(token)
-    if weighted_match:
-        numeric_str = weighted_match.group(1) or ""
-        token = weighted_match.group(2).strip()
+    # Check for A1111/ComfyUI (tag:weight) syntax first
+    paren_match = _paren_weighted_re.match(raw_token)
+    if paren_match:
+        token = paren_match.group(1).strip()
+        weight_str = paren_match.group(2)
         emphasis = "weighted"
         try:
-            numeric_value = (
-                float(numeric_str) if numeric_str not in {"", "+", "-"} else 1.0
-            )
+            numeric_value = float(weight_str)
         except ValueError:
             numeric_value = 1.0
-        local_weight *= numeric_value
+        local_weight = weight_factor * numeric_value
+    else:
+        # Check for NovelAI weight::tag:: syntax
+        weighted_match = _weighted_prompt_re.match(token)
+        if weighted_match:
+            numeric_str = weighted_match.group(1) or ""
+            token = weighted_match.group(2).strip()
+            emphasis = "weighted"
+            try:
+                numeric_value = (
+                    float(numeric_str) if numeric_str not in {"", "+", "-"} else 1.0
+                )
+            except ValueError:
+                numeric_value = 1.0
+            local_weight *= numeric_value
 
     if not token:
         return []
@@ -224,7 +261,125 @@ def parse_prompt(text: str, kind: str) -> List[TagRecord]:
     return list(results.values())
 
 
+def read_image_metadata(path: Path) -> Dict[str, str]:
+    """Read metadata from various image formats.
+
+    Tries PNG chunk metadata first (for NovelAI images), then falls back
+    to EXIF and other metadata formats for JPEG, WebP, etc.
+    """
+    suffix = path.suffix.lower()
+
+    # Try PNG chunk metadata first (NovelAI's preferred format)
+    if suffix == ".png":
+        return read_png_metadata(path)
+
+    # For other formats, try PIL/Pillow EXIF metadata
+    out: Dict[str, str] = {}
+
+    try:
+        from PIL import Image
+        from PIL.ExifTags import TAGS
+
+        with Image.open(path) as img:
+            # Get basic dimensions
+            out["Width"] = str(img.width)
+            out["Height"] = str(img.height)
+
+            # Try to get EXIF data
+            if hasattr(img, "_getexif") and img._getexif is not None:
+                exif = img._getexif()
+                if exif:
+                    for tag_id, value in exif.items():
+                        tag = TAGS.get(tag_id, tag_id)
+                        if isinstance(value, (str, int, float)):
+                            out[str(tag)] = str(value)
+
+            # Try to get other metadata formats
+            if hasattr(img, "info"):
+                for key, value in img.info.items():
+                    if isinstance(value, (str, int, float)):
+                        out[str(key)] = str(value)
+
+    except ImportError:
+        # PIL not available, just get what we can from file
+        pass
+    except Exception:
+        # Any other error reading metadata
+        pass
+
+    # For formats that might have embedded text (like some JPEG comments)
+    if suffix in {".jpg", ".jpeg"}:
+        try:
+            out.update(_read_jpeg_comment(path))
+        except Exception:
+            pass
+
+    return out
+
+
+def _read_jpeg_comment(path: Path) -> Dict[str, str]:
+    """Extract comment data from JPEG files."""
+    out: Dict[str, str] = {}
+    try:
+        with path.open("rb") as fh:
+            # Check for JPEG signature
+            header = fh.read(4)
+            if not any(header.startswith(sig) for sig in JPEG_SIGNATURES):
+                return out
+
+            fh.seek(0)
+            data = fh.read()
+
+            # Look for comment segments (0xFFFE)
+            i = 0
+            while i < len(data) - 1:
+                if data[i] == 0xFF and data[i + 1] == 0xFE:
+                    # Found comment segment
+                    if i + 4 < len(data):
+                        length = (data[i + 2] << 8) | data[i + 3]
+                        if i + 2 + length <= len(data):
+                            comment_data = data[i + 4 : i + 2 + length]
+                            try:
+                                comment_text = comment_data.decode("utf-8", "replace")
+                                out["Comment"] = comment_text
+                            except Exception:
+                                pass
+                i += 1
+    except Exception:
+        pass
+    return out
+
+
+def parse_prompt_tags(prompt: str, kind: str = "prompt") -> List[TagRecord]:
+    """Parse tags from a prompt string."""
+    if not prompt:
+        return []
+
+    try:
+        tokens = split_prompt(prompt.strip())
+        tags = []
+        for token in tokens:
+            parsed_tags = _parse_prompt_token(token, kind)
+            tags.extend(parsed_tags)
+        return tags
+    except Exception:
+        # If parsing fails, create a simple tag from the whole prompt
+        norm = normalize_tag(prompt)
+        return [
+            TagRecord(
+                tag=prompt,
+                norm=norm,
+                kind=kind,
+                emphasis="normal",
+                weight=1.0,
+                raw=prompt,
+                source="prompt",
+            )
+        ]
+
+
 def read_png_metadata(path: Path) -> Dict[str, str]:
+    """Read PNG chunk metadata (for NovelAI images)."""
     out: Dict[str, str] = {}
     with path.open("rb") as fh:
         signature = fh.read(8)
@@ -418,6 +573,33 @@ def parse_query_tokens(query: str) -> List[Tuple[str, str, bool]]:
         elif lowered.startswith("in:"):
             kind = "path"
             token = token[3:].strip()
+        elif lowered.startswith("generator:"):
+            kind = "generator"
+            token = token[10:].strip()
+        elif lowered.startswith("gen:"):
+            kind = "generator"
+            token = token[4:].strip()
+        elif lowered.startswith("model:"):
+            kind = "model"
+            token = token[6:].strip()
+        elif lowered.startswith("sampler:"):
+            kind = "sampler"
+            token = token[8:].strip()
+        elif lowered.startswith("scheduler:"):
+            kind = "scheduler"
+            token = token[10:].strip()
+        elif lowered.startswith("steps:"):
+            kind = "steps"
+            token = token[6:].strip()
+        elif lowered.startswith("cfg:"):
+            kind = "cfg_scale"
+            token = token[4:].strip()
+        elif lowered.startswith("cfg_scale:"):
+            kind = "cfg_scale"
+            token = token[10:].strip()
+        elif lowered.startswith("seed:"):
+            kind = "seed"
+            token = token[5:].strip()
         while token.startswith(("-", "!")):
             exclude = True
             token = token[1:].strip()

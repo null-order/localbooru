@@ -1,7 +1,9 @@
 """Tests for auto-tagging fallback during ingestion."""
+
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Tuple
 
 from PIL import Image
 
@@ -23,12 +25,34 @@ def test_ingest_path_populates_missing_tags_with_wd14(monkeypatch, tmp_path) -> 
     _make_png(image_path)
 
     generated = [
-        TagRecord("masterpiece", "masterpiece", "prompt", "normal", 0.92, "wd14:masterpiece:0.920", "auto"),
-        TagRecord("best_girl", "best_girl", "character", "normal", 0.88, "wd14:best_girl:0.880", "auto"),
+        TagRecord(
+            "masterpiece",
+            "masterpiece",
+            "prompt",
+            "normal",
+            0.92,
+            "wd14:masterpiece:0.920",
+            "auto",
+        ),
+        TagRecord(
+            "best_girl",
+            "best_girl",
+            "character",
+            "normal",
+            0.88,
+            "wd14:best_girl:0.880",
+            "auto",
+        ),
     ]
     observed_args: dict[str, object] = {}
 
-    def fake_generate(path: Path, *, model_name: str, general_threshold: float, character_threshold: float):
+    def fake_generate(
+        path: Path,
+        *,
+        model_name: str,
+        general_threshold: float,
+        character_threshold: float,
+    ):
         observed_args.update(
             {
                 "path": path,
@@ -37,7 +61,7 @@ def test_ingest_path_populates_missing_tags_with_wd14(monkeypatch, tmp_path) -> 
                 "character_threshold": character_threshold,
             }
         )
-        return generated
+        return generated, {}
 
     monkeypatch.setattr("localbooru.ingestion.generate_wd14_tags", fake_generate)
 
@@ -57,10 +81,7 @@ def test_ingest_path_populates_missing_tags_with_wd14(monkeypatch, tmp_path) -> 
     try:
         ingest_path(db, config, image_path)
         rows = db.connection.execute("SELECT tag, kind, source FROM tags").fetchall()
-        assert {
-            (row["tag"], row["kind"], row["source"])
-            for row in rows
-        } == {
+        assert {(row["tag"], row["kind"], row["source"]) for row in rows} == {
             ("masterpiece", "prompt", "auto"),
             ("best_girl", "character", "auto"),
         }
@@ -78,7 +99,9 @@ def test_ingest_path_skips_auto_tag_when_disabled(monkeypatch, tmp_path) -> None
     image_path = root / "no_tags.png"
     _make_png(image_path)
 
-    def fail_generate(*_: object, **__: object) -> list[TagRecord]:  # pragma: no cover - sanity guard
+    def fail_generate(
+        *_: object, **__: object
+    ) -> list[TagRecord]:  # pragma: no cover - sanity guard
         raise AssertionError("auto-tagging should not be invoked")
 
     monkeypatch.setattr("localbooru.ingestion.generate_wd14_tags", fail_generate)
@@ -107,8 +130,12 @@ def test_ingest_background_enqueues_job(monkeypatch, tmp_path) -> None:
     image_path = root / "needs_background.png"
     _make_png(image_path)
 
-    def fail_generate(*_: object, **__: object) -> list[TagRecord]:  # pragma: no cover - safety
-        raise AssertionError("synchronous auto-tagging should be disabled in background mode")
+    def fail_generate(
+        *_: object, **__: object
+    ) -> list[TagRecord]:  # pragma: no cover - safety
+        raise AssertionError(
+            "synchronous auto-tagging should be disabled in background mode"
+        )
 
     monkeypatch.setattr("localbooru.ingestion.generate_wd14_tags", fail_generate)
 
@@ -190,7 +217,15 @@ def test_apply_auto_tags_augments_and_skips(tmp_path) -> None:
     db = LocalBooruDatabase(config.db_path)
     try:
         embedded = [
-            TagRecord("sunset", "sunset", "prompt", "normal", 1.0, "embedded:sunset", "embedded"),
+            TagRecord(
+                "sunset",
+                "sunset",
+                "prompt",
+                "normal",
+                1.0,
+                "embedded:sunset",
+                "embedded",
+            ),
         ]
         ingest_path(db, config, image_path)
         db.upsert_image_record(
@@ -225,7 +260,7 @@ def test_apply_auto_tags_augments_and_skips(tmp_path) -> None:
             ],
             strategy="augment",
         )
-        assert result == "updated"
+        assert result == "applied"
         rows = db.connection.execute(
             "SELECT tag, source FROM tags WHERE image_id=? ORDER BY tag",
             (image_id,),
@@ -250,9 +285,9 @@ def test_apply_auto_tags_augments_and_skips(tmp_path) -> None:
             ],
             strategy="augment",
         )
-        assert repeat == "empty"
+        assert repeat == "skipped"
 
-        skipped = db.apply_auto_tags(
+        missing_result = db.apply_auto_tags(
             image_id=image_id,
             tags=[
                 TagRecord(
@@ -267,7 +302,7 @@ def test_apply_auto_tags_augments_and_skips(tmp_path) -> None:
             ],
             strategy="missing",
         )
-        assert skipped == "skipped"
+        assert missing_result == "applied"
     finally:
         db.close()
 
@@ -281,14 +316,21 @@ def test_generate_wd14_tags_accepts_tuple(monkeypatch, tmp_path) -> None:
     at._WD14_LOADER = None
     at._WD14_MODEL_NAMES = ["ConvNextV2"]
 
-    def fake_loader(path: str, *, model_name: str, general_threshold: float, character_threshold: float, fmt: Tuple[str, str]):
+    def fake_loader(
+        path: str,
+        *,
+        model_name: str,
+        general_threshold: float,
+        character_threshold: float,
+        fmt: Tuple[str, ...],
+    ):
         assert model_name == "ConvNextV2"
-        assert fmt == ("general", "character")
-        return ({"masterpiece": 0.91}, {"alice": 0.87})
+        assert fmt == ("rating", "general", "character")
+        return ({"explicit": 0.91}, {"masterpiece": 0.95}, {"alice": 0.87})
 
     monkeypatch.setattr(at, "_load_wd14", lambda: fake_loader)
 
-    tags = at.generate_wd14_tags(
+    tags, scores = at.generate_wd14_tags(
         test_image,
         model_name="ConvNextV2",
         general_threshold=0.25,
@@ -296,6 +338,8 @@ def test_generate_wd14_tags_accepts_tuple(monkeypatch, tmp_path) -> None:
     )
 
     lookup = {tag.tag: tag for tag in tags}
-    assert set(lookup) == {"masterpiece", "alice"}
+    assert set(lookup) == {"rating:explicit", "masterpiece", "alice"}
+    assert lookup["rating:explicit"].kind == "rating"
     assert lookup["masterpiece"].source == "auto"
     assert lookup["alice"].kind == "character"
+    assert scores == {"explicit": 0.91}

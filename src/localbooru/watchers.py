@@ -7,9 +7,13 @@ from pathlib import Path
 from typing import Optional
 
 from .config import LocalBooruConfig
+from .ingestion import IMAGE_PATTERNS
 from .scanner import Scanner
 
 LOGGER = logging.getLogger(__name__)
+
+# Extract supported extensions from IMAGE_PATTERNS
+SUPPORTED_EXTENSIONS = {pattern.lower().replace("*", "") for pattern in IMAGE_PATTERNS}
 
 try:  # pragma: no cover - optional watchdog dependency
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -30,29 +34,55 @@ class _WatchdogEventHandler(FileSystemEventHandler):  # pragma: no cover - watch
         super().__init__()
         self._scanner = scanner
 
-    def _handle_event(self, path: Optional[str], is_directory: bool) -> None:
+    def _handle_event(
+        self, path: Optional[str], is_directory: bool, event_type: str
+    ) -> None:
         if is_directory:
             return
         if not path:
             return
         suffix = Path(path).suffix.lower()
-        if suffix != ".png":
+        if suffix not in SUPPORTED_EXTENSIONS:
             return
-        LOGGER.debug("Filesystem change detected for %s; scheduling rescan", path)
-        self._scanner.trigger_scan()
+        p = Path(path)
+        LOGGER.debug("Filesystem change detected for %s: %s", path, event_type)
+        if event_type == "deleted":
+            self._scanner.mark_deleted(p)
+        else:
+            self._scanner.incremental_ingest(p)
 
     def on_created(self, event: FileSystemEvent) -> None:
-        self._handle_event(getattr(event, "src_path", None), getattr(event, "is_directory", False))
+        self._handle_event(
+            getattr(event, "src_path", None),
+            getattr(event, "is_directory", False),
+            "created",
+        )
 
     def on_modified(self, event: FileSystemEvent) -> None:
-        self._handle_event(getattr(event, "src_path", None), getattr(event, "is_directory", False))
+        self._handle_event(
+            getattr(event, "src_path", None),
+            getattr(event, "is_directory", False),
+            "modified",
+        )
 
     def on_deleted(self, event: FileSystemEvent) -> None:
-        self._handle_event(getattr(event, "src_path", None), getattr(event, "is_directory", False))
+        self._handle_event(
+            getattr(event, "src_path", None),
+            getattr(event, "is_directory", False),
+            "deleted",
+        )
 
     def on_moved(self, event: FileSystemEvent) -> None:
-        self._handle_event(getattr(event, "dest_path", None), getattr(event, "is_directory", False))
-        self._handle_event(getattr(event, "src_path", None), getattr(event, "is_directory", False))
+        self._handle_event(
+            getattr(event, "dest_path", None),
+            getattr(event, "is_directory", False),
+            "moved_dest",
+        )
+        self._handle_event(
+            getattr(event, "src_path", None),
+            getattr(event, "is_directory", False),
+            "deleted",
+        )
 
 
 class DirectoryWatcher:

@@ -1,14 +1,18 @@
 """Automatic tagging helpers backed by the WD14 family of models."""
+
 from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
+
+from PIL import Image
 
 from .config import LocalBooruConfig
 from .database import LocalBooruDatabase
@@ -200,18 +204,42 @@ class AutoTagIndexer(threading.Thread):
                 self.db.mark_auto_tag_error(image_id, str(exc))
                 self._record_error(str(exc))
                 continue
+            except (Image.UnidentifiedImageError, OSError) as exc:
+                # Handle corrupted/invalid image files more gracefully
+                if "cannot identify image file" in str(exc) or "truncated" in str(exc):
+                    LOGGER.debug(
+                        "Skipping corrupted/invalid image %s: %s", path.name, exc
+                    )
+                    self.db.mark_auto_tag_error(image_id, f"Invalid image: {exc}")
+                    self._record_error(f"{path.name}: Invalid image file")
+                else:
+                    LOGGER.warning("Image processing error for %s: %s", path.name, exc)
+                    self.db.mark_auto_tag_error(image_id, str(exc))
+                    self._record_error(f"{path.name}: {exc}")
+                continue
             except Exception as exc:  # pragma: no cover - defensive
-                LOGGER.exception("Failed to auto-tag %s: %s", path, exc)
+                LOGGER.error("Failed to auto-tag %s: %s", path.name, exc)
                 self.db.mark_auto_tag_error(image_id, str(exc))
-                self._record_error(f"{path}: {exc}")
+                self._record_error(f"{path.name}: {exc}")
                 continue
 
-            status = self.db.apply_auto_tags(
-                image_id,
-                tags,
-                strategy=self.config.auto_tag_mode,
-                rating_scores=rating_scores,
-            )
+            try:
+                status = self.db.apply_auto_tags(
+                    image_id,
+                    tags,
+                    strategy=self.config.auto_tag_mode,
+                    rating_scores=rating_scores,
+                )
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower():
+                    LOGGER.warning(
+                        "SQLite busy while applying auto-tags for %s; marking job as error",
+                        path,
+                    )
+                    self.db.mark_auto_tag_error(image_id, "database is locked")
+                    self._record_error(f"{path}: database is locked")
+                    continue
+                raise
             if status == "skipped":
                 self.db.mark_auto_tag_skipped(image_id)
             else:
@@ -239,7 +267,9 @@ def _load_wd14() -> Callable[..., object]:
     try:
         loader = getattr(module, "get_wd14_tags")
     except AttributeError as exc:  # pragma: no cover - API drift safeguard
-        raise AutoTaggingUnavailable("imgutils.tagging.get_wd14_tags is unavailable") from exc
+        raise AutoTaggingUnavailable(
+            "imgutils.tagging.get_wd14_tags is unavailable"
+        ) from exc
     _WD14_LOADER = loader
     global _WD14_MODEL_NAMES
     if _WD14_MODEL_NAMES is None:
@@ -346,7 +376,11 @@ def generate_wd14_tags(
 
     def _coerce_tag_map(payload: object) -> Dict[str, float]:
         if isinstance(payload, dict):
-            return {str(k): float(v) for k, v in payload.items() if isinstance(v, (int, float))}
+            return {
+                str(k): float(v)
+                for k, v in payload.items()
+                if isinstance(v, (int, float))
+            }
         return {}
 
     rating_map: Dict[str, float] = {}

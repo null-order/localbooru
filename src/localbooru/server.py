@@ -229,75 +229,86 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         }
 
     def do_GET(self) -> None:  # pragma: no cover - network path
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
-        if path == "/":
-            self._serve_index()
-            return
-        if path in {"/app.css", "/app.js"}:
-            self._serve_frontend_asset(path.lstrip("/"))
-            return
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            if path == "/":
+                self._serve_index()
+                return
+            if path in {"/app.css", "/app.js"}:
+                self._serve_frontend_asset(path.lstrip("/"))
+                return
 
-        if self.path == "/api/status/clip":
-            self._handle_clip_status()
-            return
-        elif self.path == "/api/status/auto":
-            self._handle_auto_status()
-            return
-        elif self.path == "/api/rating_status":
-            self._handle_rating_status()
-            return
-        elif self.path == "/api/rating_counts":
-            self._handle_rating_counts()
-            return
+            if self.path == "/api/status/clip":
+                self._handle_clip_status()
+                return
+            elif self.path == "/api/status/auto":
+                self._handle_auto_status()
+                return
+            elif self.path == "/api/rating_status":
+                self._handle_rating_status()
+                return
 
-        if path == "/api/images":
-            self._handle_images(parsed.query)
-            return
-        if path.startswith("/api/images/"):
-            identifier = path[len("/api/images/") :]
-            self._handle_image_detail(identifier)
-            return
-        if path == "/api/tags":
-            self._handle_tags(parsed.query)
-            return
-        if path == "/api/tag-stats":
-            self._handle_tag_stats()
-            return
-        if path.startswith("/files/"):
-            identifier = path[len("/files/") :]
-            self._handle_file(identifier)
-            return
-        if path.startswith("/thumbs/"):
-            identifier = path[len("/thumbs/") :]
-            self._handle_thumbnail(identifier)
-            return
-        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+            if path == "/api/images":
+                self._handle_images(parsed.query)
+                return
+            if path.startswith("/api/images/"):
+                identifier = path[len("/api/images/") :]
+                self._handle_image_detail(identifier)
+                return
+            if path == "/api/tags":
+                self._handle_tags(parsed.query)
+                return
+            if path == "/api/tag-stats":
+                self._handle_tag_stats()
+                return
+            if path.startswith("/files/"):
+                identifier = path[len("/files/") :]
+                self._handle_file(identifier)
+                return
+            if path.startswith("/thumbs/"):
+                identifier = path[len("/thumbs/") :]
+                self._handle_thumbnail(identifier)
+                return
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # Client disconnected - this is normal and expected
+            LOGGER.debug("Client disconnected during GET %s", self.path)
+        except Exception:
+            # Log unexpected errors but don't crash the server
+            LOGGER.exception("Unexpected error in GET %s", self.path)
 
     def do_POST(self) -> None:  # pragma: no cover - network path
-        parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/api/clip/pause":
-            self._handle_clip_control("pause")
-            return
-        if parsed.path == "/api/clip/resume":
-            self._handle_clip_control("resume")
-            return
-        if parsed.path == "/api/auto/pause":
-            self._handle_auto_control("pause")
-            return
-        if parsed.path == "/api/auto/resume":
-            self._handle_auto_control("resume")
-            return
-        if parsed.path == "/api/search/clip":
-            self._handle_clip_search()
-            return
-        if parsed.path == "/api/search/clip/file":
-            self._handle_clip_search_file()
-            return
-        if parsed.path == "/api/image-tags":
-            self._handle_image_tags()
-            return
-        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/api/clip/pause":
+                self._handle_clip_control("pause")
+                return
+            if parsed.path == "/api/clip/resume":
+                self._handle_clip_control("resume")
+                return
+            if parsed.path == "/api/auto/pause":
+                self._handle_auto_control("pause")
+                return
+            if parsed.path == "/api/auto/resume":
+                self._handle_auto_control("resume")
+                return
+            if parsed.path == "/api/search/clip":
+                self._handle_clip_search()
+                return
+            if parsed.path == "/api/search/clip/file":
+                self._handle_clip_search_file()
+                return
+            if parsed.path == "/api/image-tags":
+                self._handle_image_tags()
+                return
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # Client disconnected - this is normal and expected
+            LOGGER.debug("Client disconnected during POST %s", self.path)
+        except Exception:
+            # Log unexpected errors but don't crash the server
+            LOGGER.exception("Unexpected error in POST %s", self.path)
 
     def _handle_clip_status(self) -> None:
         LOGGER.debug("GET /api/status/clip")
@@ -326,7 +337,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             LOGGER.debug("GET /api/rating_status")
         db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
         total = db.connection.execute("SELECT COUNT(*) FROM images").fetchone()[0]
-        counts = self._cached_rating_counts(db)
+        counts = db.rating_counts()
         tagged = sum(counts.values())
         untagged = max(total - tagged, 0)
         payload = {
@@ -338,27 +349,6 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             "state": "complete" if untagged == 0 else "running",
         }
         self._send_json(payload)
-
-    def _handle_rating_counts(self) -> None:
-        if LOGGER.isEnabledFor(logging.DEBUG):
-            LOGGER.debug("GET /api/rating_counts")
-        db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
-        counts = self._cached_rating_counts(db)
-        payload = {label: int(counts.get(label, 0)) for label in RATING_CLASSES}
-        self._send_json({"counts": payload})
-
-    def _cached_rating_counts(self, db: LocalBooruDatabase) -> Dict[str, int]:
-        cache = getattr(self.server, "_rating_counts_cache", None)
-        now = time.time()
-        ttl = 5.0
-        if not isinstance(cache, dict) or (now - cache.get("timestamp", 0)) > ttl:
-            counts = db.rating_counts()
-            cache = {"timestamp": now, "counts": counts}
-            setattr(self.server, "_rating_counts_cache", cache)
-        cached_counts = cache.get("counts", {})
-        if not isinstance(cached_counts, dict):
-            return {}
-        return dict(cached_counts)
 
     def _serve_index(self) -> None:
         index_file = Path(__file__).resolve().parent / "frontend" / "index.html"
@@ -610,19 +600,30 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
 
         metadata_json = row_get("metadata_json")
         metadata = json.loads(metadata_json) if metadata_json else {}
-        characters = extract_character_details(metadata)
-        positive_prompt = metadata.get("prompt") if isinstance(metadata, dict) else None
+        comment_meta = (
+            metadata.get("comment_meta") if isinstance(metadata, dict) else None
+        )
+        character_source = comment_meta if isinstance(comment_meta, dict) else metadata
+        characters = extract_character_details(character_source)
+
+        # Prioritize enhanced metadata fields over JSON metadata
+        positive_prompt = row_get("prompt")
         if not positive_prompt and isinstance(metadata, dict):
-            positive_prompt = (
-                metadata.get("v4_prompt", {}).get("caption", {}).get("base_caption")
-            )
-        negative_prompt = metadata.get("uc") if isinstance(metadata, dict) else None
+            positive_prompt = metadata.get("prompt")
+            if not positive_prompt:
+                positive_prompt = (
+                    metadata.get("v4_prompt", {}).get("caption", {}).get("base_caption")
+                )
+
+        negative_prompt = row_get("negative_prompt")
         if not negative_prompt and isinstance(metadata, dict):
-            negative_prompt = (
-                metadata.get("v4_negative_prompt", {})
-                .get("caption", {})
-                .get("base_caption")
-            )
+            negative_prompt = metadata.get("uc")
+            if not negative_prompt:
+                negative_prompt = (
+                    metadata.get("v4_negative_prompt", {})
+                    .get("caption", {})
+                    .get("base_caption")
+                )
 
         image_path = row_get("path") or ""
         image_identifier = row_get("id", image_id) or image_id
@@ -642,6 +643,14 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 "metadata": metadata,
                 "mtime": row_get("mtime"),
                 "size": row_get("size"),
+                # Enhanced metadata fields
+                "generator": row_get("generator"),
+                "prompt": row_get("prompt"),
+                "negative_prompt": row_get("negative_prompt"),
+                "steps": row_get("steps"),
+                "cfg_scale": row_get("cfg_scale"),
+                "sampler": row_get("sampler"),
+                "scheduler": row_get("scheduler"),
             },
             "tags": [
                 {
@@ -1190,8 +1199,12 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 shutil.copyfileobj(fh, self.wfile)
         except FileNotFoundError:
             self.send_error(HTTPStatus.NOT_FOUND, "File missing")
-        except BrokenPipeError:  # pragma: no cover - client disconnected
-            LOGGER.warning("Client disconnected while streaming %s", path)
+        except (
+            BrokenPipeError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+        ):  # pragma: no cover - client disconnected
+            LOGGER.debug("Client disconnected while streaming %s", path)
 
     def _handle_file(self, identifier: str) -> None:
         try:
@@ -1251,7 +1264,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         self, format: str, *args
     ) -> None:  # pragma: no cover - adjust logging
         message = format % args
-        low_traffic_paths = ("/api/status/", "/api/rating_counts", "/api/rating_status")
+        low_traffic_paths = ("/api/status/", "/api/rating_status")
         if any(path in message for path in low_traffic_paths):
             LOGGER.debug("%s - %s", self.address_string(), message)
         else:

@@ -43,7 +43,7 @@ No special syntax—leverages existing `search.py` (build_matched_cte, collect_t
 
 - ### UI Elements
 - **Gallery Sidebar**:
-- **Rating Filter Card**: Checkboxes for each class (default: check General/Sensitive/Questionable, uncheck Explicit). Each pill displays a live count (fed by `/api/rating_counts`) so the numbers refresh as new items are scanned or tagged. Toggling automatically injects or removes `-rating:{class}` exclusions.
+- **Rating Filter Card**: Checkboxes for each class (default: check General/Sensitive/Questionable, uncheck Explicit). Each pill displays a live count (calculated from the local tag stats cache) so the numbers refresh as new items are scanned or tagged. Toggling automatically injects or removes `-rating:{class}` exclusions.
 - Status chips in the detail pane include a "Rating" entry that tracks queue position and readiness alongside CLIP and auto-tag states.
 
 - **Detail Page**:

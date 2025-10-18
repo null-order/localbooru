@@ -18,9 +18,7 @@ def _default_state_dir() -> Path:
 
 
 def _default_cache_dir() -> Path:
-    cache_root = Path(
-        os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")
-    ).expanduser()
+    cache_root = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser()
     return (cache_root / "localbooru" / "thumbs").resolve()
 
 
@@ -84,6 +82,26 @@ class LocalBooruConfig:
     extra_roots: list[Path] = field(default_factory=list)
     config_file: Optional[Path] = None
     service_mode: bool = False
+    image_patterns: list[str] = field(
+        default_factory=lambda: [
+            "*.png",
+            "*.PNG",
+            "*.jpg",
+            "*.JPG",
+            "*.jpeg",
+            "*.JPEG",
+            "*.webp",
+            "*.WEBP",
+            "*.gif",
+            "*.GIF",
+            "*.bmp",
+            "*.BMP",
+            "*.tiff",
+            "*.TIFF",
+            "*.tga",
+            "*.TGA",
+        ]
+    )
 
     @classmethod
     def from_sources(
@@ -152,6 +170,11 @@ class LocalBooruConfig:
 
         seen_paths: set[Path] = {root_path}
         extra_paths: list[Path] = []
+        if cli_root and config_primary:
+            config_primary_path = resolve_config_path(config_primary)
+            if config_primary_path not in seen_paths:
+                extra_paths.append(config_primary_path)
+                seen_paths.add(config_primary_path)
         for value in config_additional:
             path = resolve_config_path(value)
             if path not in seen_paths:
@@ -228,13 +251,37 @@ class LocalBooruConfig:
         auto_tag_character_threshold_value = float(
             resolve("auto_tag_character_threshold", default=0.85)
         )
-        auto_tag_mode_value = (
-            str(resolve("auto_tag_mode", default="augment") or "augment").lower()
-        )
+        auto_tag_mode_value = str(
+            resolve("auto_tag_mode", default="augment") or "augment"
+        ).lower()
         auto_tag_batch_size_value = max(
             1, int(resolve("auto_tag_batch_size", default=4))
         )
         log_level_value = str(resolve("log_level", default="INFO")).upper()
+
+        # Handle image patterns configuration
+        patterns_option = option("image_patterns", "supported_formats", default=None)
+        if patterns_option and isinstance(patterns_option, (list, tuple)):
+            image_patterns_value = [str(p) for p in patterns_option if p]
+        else:
+            image_patterns_value = [
+                "*.png",
+                "*.PNG",
+                "*.jpg",
+                "*.JPG",
+                "*.jpeg",
+                "*.JPEG",
+                "*.webp",
+                "*.WEBP",
+                "*.gif",
+                "*.GIF",
+                "*.bmp",
+                "*.BMP",
+                "*.tiff",
+                "*.TIFF",
+                "*.tga",
+                "*.TGA",
+            ]
 
         return cls(
             root=root_path,
@@ -272,6 +319,7 @@ class LocalBooruConfig:
             extra_roots=extra_paths,
             config_file=config_path,
             service_mode=service_mode,
+            image_patterns=image_patterns_value,
         )
 
     @property
@@ -347,6 +395,19 @@ def render_default_config_template() -> str:
         auto_tag_general_threshold = 0.35
         auto_tag_character_threshold = 0.85
         auto_tag_batch_size = 4
+
+        # --- Supported image formats ------------------------------------------
+        # Customize which image file types to scan and index
+        image_patterns = [
+            "*.png", "*.PNG",           # Primary: NovelAI PNGs with metadata
+            "*.jpg", "*.JPG",           # JPEG formats
+            "*.jpeg", "*.JPEG",         # Alternative JPEG extension
+            "*.webp", "*.WEBP",         # Modern WebP format
+            "*.gif", "*.GIF",           # GIF format
+            "*.bmp", "*.BMP",           # Bitmap format
+            "*.tiff", "*.TIFF",         # TIFF format
+            "*.tga", "*.TGA",           # TGA format
+        ]
 
         # Install extras:
         #   pip install localbooru[clip,tagging,watch,ui]
