@@ -1908,9 +1908,10 @@ function renderFacets(facets) {
   facetLookup.clear();
   clearHighlights();
   const source = Array.isArray(facets) ? facets : [];
-  const filtered = source.filter((facet) =>
-    hideUCTags ? facet.kind !== "negative" : true,
-  );
+  const filtered = source.filter((facet) => {
+    if (facet.kind === "rating") return false; // Hide rating tags from sidebar
+    return hideUCTags ? facet.kind !== "negative" : true;
+  });
   if (filtered.length === 0) {
     const empty = document.createElement("li");
     empty.textContent = "No tags";
@@ -2065,10 +2066,24 @@ if (searchClearBtn) {
 }
 
 if (ratingFilterMeta.length) {
-  ratingFilterMeta.forEach(({ input }) => {
+  ratingFilterMeta.forEach(({ input, label, countEl, value }) => {
     input.addEventListener("change", () => {
       applyRatingFiltersToQuery();
     });
+
+    // Add highlighting to entire rating filter label
+    if (label) {
+      const ratingKey = `rating|${value}`;
+      label.addEventListener("mouseenter", () => {
+        highlightFromFacet(ratingKey);
+        label.classList.add("rating-filter-highlight");
+      });
+      label.addEventListener("mouseleave", () => {
+        clearHighlights();
+        label.classList.remove("rating-filter-highlight");
+      });
+      label.style.cursor = "pointer";
+    }
   });
 }
 
@@ -2529,8 +2544,23 @@ async function openDetail(id, options = {}) {
     detailImage.parentElement.style.removeProperty("aspect-ratio");
     detailImage.style.removeProperty("aspect-ratio");
     let infoFields = [];
+
+    // Enhanced AI metadata fields
+    if (item.generator)
+      infoFields.push({ label: "Generator", value: item.generator });
     if (item.model) infoFields.push({ label: "Model", value: item.model });
+    if (item.sampler)
+      infoFields.push({ label: "Sampler", value: item.sampler });
+    if (item.scheduler)
+      infoFields.push({ label: "Scheduler", value: item.scheduler });
+
+    // Generation parameters
+    if (item.steps) infoFields.push({ label: "Steps", value: item.steps });
+    if (item.cfg_scale)
+      infoFields.push({ label: "CFG Scale", value: item.cfg_scale });
     if (item.seed) infoFields.push({ label: "Seed", value: item.seed });
+
+    // Basic image info
     infoFields.push(
       {
         label: "Dimensions",
@@ -3532,24 +3562,6 @@ async function pollAutoStatus() {
   }
 }
 
-async function pollRatingCounts() {
-  if (!ratingFilterMeta.length) {
-    return;
-  }
-  try {
-    const res = await fetch("/api/rating_counts");
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-    const data = await res.json();
-    if (data && data.counts) {
-      updateRatingFilterCounts(data.counts);
-    }
-  } catch (err) {
-    // Suppress noisy errors; counts will refresh on next successful poll
-  }
-}
-
 async function toggleClipIndexer() {
   if (!clipToggleBtn) return;
   const state = clipToggleBtn.dataset.state;
@@ -3586,8 +3598,6 @@ if (autoToggleBtn) {
 setInterval(() => {
   pollClipStatus();
   pollAutoStatus();
-  pollRatingCounts();
 }, 2000);
 pollClipStatus();
 pollAutoStatus();
-pollRatingCounts();

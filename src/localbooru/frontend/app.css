@@ -490,7 +490,11 @@ main {
 }
 
 .rating-filter input[type="checkbox"]:checked {
-    background: linear-gradient(135deg, rgba(98, 214, 255, 0.85), rgba(147, 197, 253, 0.9));
+    background: linear-gradient(
+        135deg,
+        rgba(98, 214, 255, 0.85),
+        rgba(147, 197, 253, 0.9)
+    );
     border-color: rgba(98, 214, 255, 0.9);
     box-shadow: 0 0 0 1px rgba(98, 214, 255, 0.35);
 }
@@ -537,6 +541,22 @@ main {
 .rating-filter.rating-has-results .rating-count {
     background: rgba(98, 214, 255, 0.18);
     color: rgba(214, 243, 255, 0.95);
+}
+
+.rating-count:hover {
+    background: rgba(98, 214, 255, 0.25);
+    color: rgba(214, 243, 255, 1);
+    transition:
+        background 0.15s ease,
+        color 0.15s ease;
+}
+
+.rating-filter.rating-filter-highlight {
+    background: rgba(98, 214, 255, 0.24);
+    color: #e5f9ff;
+    border-radius: 8px;
+    padding: 4px 8px;
+    margin: -4px -8px;
 }
 
 .rating-filter input[type="checkbox"] {
@@ -1075,7 +1095,11 @@ main {
     position: absolute;
     inset: 0;
     border-radius: inherit;
-    background: linear-gradient(90deg, rgba(98, 214, 255, 0.85), rgba(147, 197, 253, 0.9));
+    background: linear-gradient(
+        90deg,
+        rgba(98, 214, 255, 0.85),
+        rgba(147, 197, 253, 0.9)
+    );
     transform-origin: left center;
 }
 
