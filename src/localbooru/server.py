@@ -270,6 +270,10 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 identifier = path[len("/thumbs/") :]
                 self._handle_thumbnail(identifier)
                 return
+            if path.startswith("/api/search/clip/token/"):
+                token = path[len("/api/search/clip/token/") :]
+                self._handle_clip_token_lookup(token)
+                return
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             # Client disconnected - this is normal and expected
@@ -322,6 +326,36 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(blob)))
         self.end_headers()
         self.wfile.write(blob)
+
+    def _handle_clip_token_lookup(self, token: str) -> None:
+        if not token:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Missing token")
+            return
+        db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
+        row = db.get_clip_upload(token, extend=True)
+        if row is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "Token expired or unknown")
+            return
+        vector_blob = row["vector"] if "vector" in row.keys() else row[0]
+        thumbnail_blob = row["thumbnail"] if "thumbnail" in row.keys() else None
+        vector_b64 = (
+            base64.b64encode(vector_blob).decode("ascii") if vector_blob else ""
+        )
+        thumbnail_b64 = (
+            base64.b64encode(thumbnail_blob).decode("ascii")
+            if thumbnail_blob
+            else None
+        )
+        payload = {
+            "token": token,
+            "vector": vector_b64,
+            "filename": row["filename"] if "filename" in row.keys() else None,
+            "mime_type": row["mime_type"] if "mime_type" in row.keys() else None,
+            "thumbnail": thumbnail_b64,
+            "created_at": row["created_at"] if "created_at" in row.keys() else None,
+            "expires_at": row["expires_at"] if "expires_at" in row.keys() else None,
+        }
+        self._send_json(payload)
 
     def _handle_auto_status(self) -> None:
         LOGGER.debug("GET /api/status/auto")
@@ -949,6 +983,24 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 continue
             positive_vectors.append(arr / norm)
 
+        clip_token_value = payload.get("clip_token")
+        if isinstance(clip_token_value, str) and clip_token_value:
+            upload_row = db.get_clip_upload(clip_token_value)
+            if upload_row is not None:
+                vector_blob = upload_row["vector"] if "vector" in upload_row.keys() else None
+                if vector_blob:
+                    token_arr = np.frombuffer(vector_blob, dtype=np.float32)
+                    if token_arr.size:
+                        norm = np.linalg.norm(token_arr)
+                        if np.isfinite(norm) and norm != 0:
+                            positive_vectors.append(token_arr / norm)
+                        else:
+                            LOGGER.warning("clip token %s produced invalid vector", clip_token_value)
+                else:
+                    LOGGER.warning("clip token %s missing vector", clip_token_value)
+            else:
+                LOGGER.info("clip token %s was not found or expired", clip_token_value)
+
         restrict_ids = None
         if isinstance(tag_query, str) and tag_query.strip():
             conn = db.new_connection()
@@ -1067,7 +1119,20 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Invalid CLIP vector")
             return
         vector /= norm
-        vector_b64 = base64.b64encode(vector.tobytes()).decode("ascii")
+        vector_bytes = vector.tobytes()
+        vector_b64 = base64.b64encode(vector_bytes).decode("ascii")
+
+        thumbnail_bytes: Optional[bytes] = None
+        try:
+            thumb = image.copy()
+            # Pillow compatibility across versions
+            resample = getattr(Image, "Resampling", Image).LANCZOS  # type: ignore[attr-defined]
+            thumb.thumbnail((256, 256), resample=resample)
+            buffer = io.BytesIO()
+            thumb.save(buffer, format="PNG")
+            thumbnail_bytes = buffer.getvalue()
+        except Exception as exc:  # pragma: no cover - best effort
+            LOGGER.debug("Unable to generate thumbnail for clip upload: %s", exc)
 
         def _field(name: str, default: str = "") -> str:
             values = fields.get(name)
@@ -1096,6 +1161,12 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 conn.close()
 
         db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
+        clip_token = db.create_clip_upload(
+            vector_bytes,
+            filename,
+            upload_info.get("content_type") if upload_info else None,
+            thumbnail_bytes,
+        )
         full_results = perform_clip_search(
             db=db,
             config=config,
@@ -1117,6 +1188,9 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         )
         payload["vector"] = vector_b64
         payload["filename"] = filename
+        payload["clip_token"] = clip_token
+        if thumbnail_bytes:
+            payload["thumbnail"] = base64.b64encode(thumbnail_bytes).decode("ascii")
         self._send_json(payload)
 
     def _handle_image_tags(self) -> None:
