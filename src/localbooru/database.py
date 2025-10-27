@@ -6,7 +6,6 @@ import json
 import logging
 import sqlite3
 import time
-import secrets
 from contextlib import closing
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
@@ -16,7 +15,6 @@ from .tags import TagRecord
 LOGGER = logging.getLogger(__name__)
 
 BUSY_TIMEOUT_MS = 5000
-CLIP_UPLOAD_TTL_SECONDS = 60 * 60 * 24 * 7
 
 SCHEMA_STATEMENTS = [
     "PRAGMA journal_mode=WAL;",
@@ -79,16 +77,6 @@ SCHEMA_STATEMENTS = [
     "    updated_at REAL NOT NULL,\n"
     "    FOREIGN KEY(image_id) REFERENCES images(id) ON DELETE CASCADE\n"
     ");",
-    "CREATE TABLE IF NOT EXISTS clip_uploads (\n"
-    "    token TEXT PRIMARY KEY,\n"
-    "    vector BLOB NOT NULL,\n"
-    "    filename TEXT,\n"
-    "    mime_type TEXT,\n"
-    "    thumbnail BLOB,\n"
-    "    created_at REAL NOT NULL,\n"
-    "    expires_at REAL NOT NULL\n"
-    ");",
-    "CREATE INDEX IF NOT EXISTS clip_uploads_expires_idx ON clip_uploads(expires_at);",
     "CREATE TABLE IF NOT EXISTS rating_jobs (\n"
     "    image_id INTEGER PRIMARY KEY,\n"
     "    status TEXT NOT NULL,\n"
@@ -555,68 +543,6 @@ class LocalBooruDatabase:
             (image_id, model),
         ).fetchone()
         return row["vector"] if row else None
-
-    def purge_expired_clip_uploads(self) -> int:
-        now = time.time()
-        conn = self.new_connection()
-        try:
-            with conn:
-                cur = conn.execute(
-                    "DELETE FROM clip_uploads WHERE expires_at < ?",
-                    (now,),
-                )
-            if cur.rowcount is None or cur.rowcount < 0:
-                return 0
-            return int(cur.rowcount)
-        finally:
-            conn.close()
-
-    def create_clip_upload(
-        self,
-        vector: bytes,
-        filename: Optional[str],
-        mime_type: Optional[str],
-        thumbnail: Optional[bytes],
-        ttl: float = CLIP_UPLOAD_TTL_SECONDS,
-    ) -> str:
-        self.purge_expired_clip_uploads()
-        created = time.time()
-        expires = created + max(float(ttl), 60.0)
-        while True:
-            token = secrets.token_urlsafe(18)
-            try:
-                self._execute_with_retry(
-                    "INSERT INTO clip_uploads(token, vector, filename, mime_type, thumbnail, created_at, expires_at) VALUES (?,?,?,?,?,?,?)",
-                    (
-                        token,
-                        vector,
-                        filename,
-                        mime_type,
-                        thumbnail,
-                        created,
-                        expires,
-                    ),
-                )
-                return token
-            except sqlite3.IntegrityError:
-                continue
-
-    def get_clip_upload(self, token: str, *, extend: bool = True) -> Optional[sqlite3.Row]:
-        conn = self.new_connection()
-        try:
-            row = conn.execute(
-                "SELECT token, vector, filename, mime_type, thumbnail, created_at, expires_at FROM clip_uploads WHERE token=?",
-                (token,),
-            ).fetchone()
-            if row and extend:
-                new_expiry = time.time() + CLIP_UPLOAD_TTL_SECONDS
-                conn.execute(
-                    "UPDATE clip_uploads SET expires_at=? WHERE token=?",
-                    (new_expiry, token),
-                )
-            return row
-        finally:
-            conn.close()
 
     def has_ready_clip(self, image_id: int, model: str) -> bool:
         row = self._connection.execute(

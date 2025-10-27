@@ -235,7 +235,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             if path == "/":
                 self._serve_index()
                 return
-            if path in {"/app.css", "/app.js"}:
+            if path in {"/app.css", "/app.js", "/clip_state.js"}:
                 self._serve_frontend_asset(path.lstrip("/"))
                 return
 
@@ -270,10 +270,6 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 identifier = path[len("/thumbs/") :]
                 self._handle_thumbnail(identifier)
                 return
-            if path.startswith("/api/search/clip/token/"):
-                token = path[len("/api/search/clip/token/") :]
-                self._handle_clip_token_lookup(token)
-                return
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             # Client disconnected - this is normal and expected
@@ -300,8 +296,8 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/search/clip":
                 self._handle_clip_search()
                 return
-            if parsed.path == "/api/search/clip/file":
-                self._handle_clip_search_file()
+            if parsed.path == "/api/clip/embed":
+                self._handle_clip_embed()
                 return
             if parsed.path == "/api/image-tags":
                 self._handle_image_tags()
@@ -326,36 +322,6 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(blob)))
         self.end_headers()
         self.wfile.write(blob)
-
-    def _handle_clip_token_lookup(self, token: str) -> None:
-        if not token:
-            self.send_error(HTTPStatus.BAD_REQUEST, "Missing token")
-            return
-        db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
-        row = db.get_clip_upload(token, extend=True)
-        if row is None:
-            self.send_error(HTTPStatus.NOT_FOUND, "Token expired or unknown")
-            return
-        vector_blob = row["vector"] if "vector" in row.keys() else row[0]
-        thumbnail_blob = row["thumbnail"] if "thumbnail" in row.keys() else None
-        vector_b64 = (
-            base64.b64encode(vector_blob).decode("ascii") if vector_blob else ""
-        )
-        thumbnail_b64 = (
-            base64.b64encode(thumbnail_blob).decode("ascii")
-            if thumbnail_blob
-            else None
-        )
-        payload = {
-            "token": token,
-            "vector": vector_b64,
-            "filename": row["filename"] if "filename" in row.keys() else None,
-            "mime_type": row["mime_type"] if "mime_type" in row.keys() else None,
-            "thumbnail": thumbnail_b64,
-            "created_at": row["created_at"] if "created_at" in row.keys() else None,
-            "expires_at": row["expires_at"] if "expires_at" in row.keys() else None,
-        }
-        self._send_json(payload)
 
     def _handle_auto_status(self) -> None:
         LOGGER.debug("GET /api/status/auto")
@@ -960,15 +926,22 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
         config: LocalBooruConfig = self.server.config  # type: ignore[attr-defined]
 
+        def _collect_vector_strings(value) -> List[str]:
+            collected: List[str] = []
+            if isinstance(value, str):
+                if value.strip():
+                    collected.append(value.strip())
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str) and item.strip():
+                        collected.append(item.strip())
+            return collected
+
         positive_vectors: List[np.ndarray] = []
-        positive_vector_payload = payload.get("positive_vector")
-        if isinstance(positive_vector_payload, list):
-            vector_strings = positive_vector_payload
-        elif isinstance(positive_vector_payload, str):
-            vector_strings = [positive_vector_payload]
-        else:
-            vector_strings = []
-        for vector_str in vector_strings:
+        positive_vector_strings: List[str] = []
+        positive_vector_strings.extend(_collect_vector_strings(payload.get("positive_vector")))
+        positive_vector_strings.extend(_collect_vector_strings(payload.get("positive_vectors")))
+        for vector_str in positive_vector_strings:
             if not isinstance(vector_str, str) or not vector_str:
                 continue
             try:
@@ -983,23 +956,24 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
                 continue
             positive_vectors.append(arr / norm)
 
-        clip_token_value = payload.get("clip_token")
-        if isinstance(clip_token_value, str) and clip_token_value:
-            upload_row = db.get_clip_upload(clip_token_value)
-            if upload_row is not None:
-                vector_blob = upload_row["vector"] if "vector" in upload_row.keys() else None
-                if vector_blob:
-                    token_arr = np.frombuffer(vector_blob, dtype=np.float32)
-                    if token_arr.size:
-                        norm = np.linalg.norm(token_arr)
-                        if np.isfinite(norm) and norm != 0:
-                            positive_vectors.append(token_arr / norm)
-                        else:
-                            LOGGER.warning("clip token %s produced invalid vector", clip_token_value)
-                else:
-                    LOGGER.warning("clip token %s missing vector", clip_token_value)
-            else:
-                LOGGER.info("clip token %s was not found or expired", clip_token_value)
+        negative_vectors: List[np.ndarray] = []
+        negative_vector_strings: List[str] = []
+        negative_vector_strings.extend(_collect_vector_strings(payload.get("negative_vector")))
+        negative_vector_strings.extend(_collect_vector_strings(payload.get("negative_vectors")))
+        for vector_str in negative_vector_strings:
+            if not isinstance(vector_str, str) or not vector_str:
+                continue
+            try:
+                decoded = base64.b64decode(vector_str)
+            except (binascii.Error, ValueError):  # type: ignore[name-defined]
+                continue
+            arr = np.frombuffer(decoded, dtype=np.float32)
+            if arr.size == 0:
+                continue
+            norm = np.linalg.norm(arr)
+            if not np.isfinite(norm) or norm == 0:
+                continue
+            negative_vectors.append(arr / norm)
 
         restrict_ids = None
         if isinstance(tag_query, str) and tag_query.strip():
@@ -1024,6 +998,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             limit=0,
             restrict_to_ids=restrict_ids,
             positive_vectors=positive_vectors or None,
+            negative_vectors=negative_vectors or None,
         )
 
         total = len(full_results)
@@ -1039,7 +1014,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         )
         self._send_json(payload)
 
-    def _handle_clip_search_file(self) -> None:
+    def _handle_clip_embed(self) -> None:
         config: LocalBooruConfig = self.server.config  # type: ignore[attr-defined]
         if not getattr(config, "clip_enabled", False):
             self.send_error(HTTPStatus.BAD_REQUEST, "CLIP indexing disabled")
@@ -1061,7 +1036,7 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, "Invalid body")
             return
 
-        fields, files = self._parse_multipart_form(body, content_type)
+        _fields, files = self._parse_multipart_form(body, content_type)
         upload_info = None
         for file_entry in files:
             if file_entry.get("name") == "file":
@@ -1121,6 +1096,8 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         vector /= norm
         vector_bytes = vector.tobytes()
         vector_b64 = base64.b64encode(vector_bytes).decode("ascii")
+        vector_hash = hashlib.sha256(vector_bytes).digest()
+        vector_id = base64.urlsafe_b64encode(vector_hash[:18]).decode("ascii").rstrip("=")
 
         thumbnail_bytes: Optional[bytes] = None
         try:
@@ -1134,61 +1111,17 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # pragma: no cover - best effort
             LOGGER.debug("Unable to generate thumbnail for clip upload: %s", exc)
 
-        def _field(name: str, default: str = "") -> str:
-            values = fields.get(name)
-            if not values:
-                return default
-            return values[0]
+        mime_type = upload_info.get("content_type") or mimetypes.guess_type(
+            filename
+        )[0]
 
-        try:
-            limit = max(1, min(int(_field("limit", "20")), 200))
-        except ValueError:
-            limit = 20
-        try:
-            offset = max(0, int(_field("offset", "0")))
-        except ValueError:
-            offset = 0
-        tag_query = _field("tag_query", "") or ""
-        include_tags = _coerce_bool(_field("include_tags", "0"), False)
-
-        restrict_ids = None
-        if isinstance(tag_query, str) and tag_query.strip():
-            conn = self.server.db.new_connection()  # type: ignore[attr-defined]
-            try:
-                tokens = tokens_from_query(tag_query)
-                restrict_ids = matched_image_ids(conn, tokens, config)
-            finally:
-                conn.close()
-
-        db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
-        clip_token = db.create_clip_upload(
-            vector_bytes,
-            filename,
-            upload_info.get("content_type") if upload_info else None,
-            thumbnail_bytes,
-        )
-        full_results = perform_clip_search(
-            db=db,
-            config=config,
-            positive_vectors=[vector],
-            limit=0,
-            restrict_to_ids=restrict_ids,
-        )
-
-        total = len(full_results)
-        window = (
-            full_results[offset : offset + limit] if limit else full_results[offset:]
-        )
-        payload = self._build_clip_response(
-            window,
-            total,
-            offset,
-            limit,
-            include_tags=include_tags,
-        )
-        payload["vector"] = vector_b64
-        payload["filename"] = filename
-        payload["clip_token"] = clip_token
+        payload = {
+            "vector": vector_b64,
+            "vector_id": vector_id,
+            "filename": filename,
+        }
+        if mime_type:
+            payload["mime_type"] = mime_type
         if thumbnail_bytes:
             payload["thumbnail"] = base64.b64encode(thumbnail_bytes).decode("ascii")
         self._send_json(payload)
