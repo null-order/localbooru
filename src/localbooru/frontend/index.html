@@ -27,14 +27,21 @@
                         ×
                     </button>
                 </div>
-                <div class="search-field" data-role="clip-search">
+                <div class="search-field clip-search-field" data-role="clip-search">
                     <label for="clip-query" class="sr-only">CLIP search</label>
-                    <input
-                        type="text"
-                        id="clip-query"
-                        placeholder="CLIP search…"
-                        autocomplete="off"
-                    />
+                    <div class="clip-input-shell">
+                        <div
+                            id="clip-chip-container"
+                            class="clip-chip-strip"
+                            aria-live="polite"
+                        ></div>
+                        <input
+                            type="text"
+                            id="clip-query"
+                            placeholder="CLIP search…"
+                            autocomplete="off"
+                        />
+                    </div>
                     <button
                         type="button"
                         class="input-action"
@@ -369,6 +376,7 @@
                 <span>to find similar results</span>
             </div>
         </div>
+        <script src="clip_state.js"></script>
         <script src="app.js"></script>
     </body>
 </html>

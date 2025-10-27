@@ -12,6 +12,7 @@ const clipProgressBar = document.getElementById("clip-progress-bar");
 const clipToggleBtn = document.getElementById("clip-toggle");
 const clipSearchInput = document.getElementById("clip-query");
 const clipSearchClear = document.getElementById("clip-clear");
+const clipChipContainer = document.getElementById("clip-chip-container");
 const autoStatusSection = document.getElementById("auto-status");
 const autoSummary = document.getElementById("auto-summary");
 const autoErrorsList = document.getElementById("auto-errors");
@@ -86,7 +87,13 @@ let suggestionIndex = -1;
 const headerEl = document.querySelector(".app-header");
 const PAGE_SIZE = 40;
 const TAG_FETCH_BATCH_SIZE = 80;
-let currentHistoryState = { query: "", detail: null, pos: 0, clip: null };
+let currentHistoryState = {
+  query: "",
+  detail: null,
+  pos: 0,
+  clip: null,
+  clipSnapshot: null,
+};
 let pendingScrollIndex = null;
 let scrollRestorePending = false;
 let scrollSaveScheduled = false;
@@ -108,6 +115,11 @@ let lastClipPayload = null;
 let clipTotal = 0;
 let clipOffset = 0;
 let currentClipToken = null;
+const clipChipState = {
+  items: [],
+  seq: 1,
+};
+let pendingClipSearchOptions = null;
 
 let currentDetailId = null;
 let currentDetailIndex = -1;
@@ -217,14 +229,10 @@ function getActiveClipToken() {
     return currentClipToken;
   }
   if (lastClipPayload && typeof lastClipPayload === "object") {
-    if (
-      typeof lastClipPayload.clipToken === "string" &&
-      lastClipPayload.clipToken
-    ) {
-      currentClipToken = lastClipPayload.clipToken;
-      return lastClipPayload.clipToken;
-    }
-    const encoded = encodeClipState(lastClipPayload);
+    const encoded = ClipState.encodeQuery({
+      query: lastClipPayload.query,
+      chips: lastClipPayload.chipsSnapshot || exportClipChips(),
+    });
     if (encoded) {
       currentClipToken = encoded;
       return encoded;
@@ -247,43 +255,6 @@ function normalizeIndex(value) {
   if (!Number.isFinite(num)) return null;
   const intVal = Math.trunc(num);
   return intVal >= 0 ? intVal : null;
-}
-
-function encodeClipState(payload) {
-  if (!payload) return null;
-  if (payload.positiveImages && payload.positiveImages.length) {
-    const id = Number(payload.positiveImages[0]);
-    if (Number.isFinite(id)) {
-      return `image:${id}`;
-    }
-  }
-  if (payload.query && payload.query.trim()) {
-    return `text:${encodeURIComponent(payload.query.trim())}`;
-  }
-  return null;
-}
-
-function decodeClipState(value) {
-  if (typeof value !== "string" || !value) {
-    return null;
-  }
-  if (value.startsWith("image:")) {
-    const id = Number(value.slice(6));
-    if (Number.isFinite(id)) {
-      return { mode: "image", id };
-    }
-    return null;
-  }
-  if (value.startsWith("text:")) {
-    try {
-      const query = decodeURIComponent(value.slice(5));
-      return { mode: "text", query };
-    } catch (err) {
-      console.error("Failed to decode clip text state", err);
-      return null;
-    }
-  }
-  return null;
 }
 
 function buildClipFacetSummaryFromImageTags(imageTagMap) {
@@ -440,6 +411,702 @@ function deriveFilename(item) {
 function getFallbackLabel(item) {
   const filename = deriveFilename(item);
   return truncateLabel(filename || "untitled", 38);
+}
+
+function base64ToFloat32Vector(base64) {
+  if (typeof base64 !== "string" || !base64) return null;
+  try {
+    const binary = atob(base64);
+    const { length } = binary;
+    if (length % 4 !== 0) {
+      console.warn("Unexpected CLIP vector length", length);
+      return null;
+    }
+    const buffer = new ArrayBuffer(length);
+    const bytes = new Uint8Array(buffer);
+    for (let i = 0; i < length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new Float32Array(buffer);
+  } catch (err) {
+    console.error("Failed to decode CLIP vector", err);
+    return null;
+  }
+}
+
+function float32ToBase64(vector, { negate = false } = {}) {
+  if (!(vector instanceof Float32Array)) {
+    return null;
+  }
+  let view = vector;
+  if (negate) {
+    view = new Float32Array(vector.length);
+    for (let i = 0; i < vector.length; i += 1) {
+      view[i] = -vector[i];
+    }
+  }
+  const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+    const slice = bytes.subarray(offset, offset + CHUNK);
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+}
+
+function getChipVectorBase64(chip, { negate = false } = {}) {
+  if (!chip || !(chip.vector instanceof Float32Array)) return null;
+  if (!chip.vectorCache) {
+    chip.vectorCache = {};
+  }
+  const key = negate ? "negative" : "positive";
+  if (chip.vectorCache[key]) {
+    return chip.vectorCache[key];
+  }
+  const encoded = float32ToBase64(chip.vector, { negate });
+  if (encoded) {
+    chip.vectorCache[key] = encoded;
+  }
+  return encoded;
+}
+
+function clipChipPreviewUrl(chip) {
+  if (!chip) return "";
+  if (chip.thumbnail) return chip.thumbnail;
+  if (chip.previewUrl) return chip.previewUrl;
+  if (chip.kind === "gallery" && Number.isFinite(chip.imageId)) {
+    return `/thumbs/${chip.imageId}`;
+  }
+  return "";
+}
+
+function setClipChipBackground(element, url) {
+  if (!element) return;
+  if (!url) {
+    element.style.backgroundImage = "none";
+    return;
+  }
+  const safeUrl = url.replace(/["'\\]/g, "\\$&");
+  element.style.backgroundImage = `url("${safeUrl}")`;
+}
+
+function destroyClipChipPreview(chip) {
+  if (chip && chip.previewUrl) {
+    try {
+      URL.revokeObjectURL(chip.previewUrl);
+    } catch (err) {
+      console.debug("Failed to revoke preview URL", err);
+    }
+    chip.previewUrl = null;
+  }
+}
+
+function updateClipSearchClearVisibility() {
+  if (!clipSearchClear) return;
+  const hasText =
+    clipSearchInput && clipSearchInput.value && clipSearchInput.value.trim();
+  const hasChips = clipChipState.items.length > 0;
+  if (hasText || hasChips) {
+    clipSearchClear.classList.add("input-action-visible");
+  } else {
+    clipSearchClear.classList.remove("input-action-visible");
+  }
+}
+
+function renderClipChips() {
+  if (!clipChipContainer) {
+    updateClipSearchClearVisibility();
+    return;
+  }
+  clipChipContainer.innerHTML = "";
+  if (!clipChipState.items.length) {
+    updateClipSearchClearVisibility();
+    return;
+  }
+  clipChipState.items.forEach((chip) => {
+    if (!chip) return;
+    const chipEl = document.createElement("div");
+    chipEl.className = "clip-chip";
+    chipEl.dataset.id = String(chip.id);
+    if (chip.negative) {
+      chipEl.classList.add("clip-chip-negative");
+    }
+    if (chip.status === "pending") {
+      chipEl.classList.add("clip-chip-pending");
+    }
+    chipEl.setAttribute("role", "group");
+    const labelParts = [];
+    if (chip.label) labelParts.push(chip.label);
+    if (chip.kind === "gallery" && Number.isFinite(chip.imageId)) {
+      labelParts.push(`image ${chip.imageId}`);
+    }
+    if (chip.negative) {
+      labelParts.push("negative");
+    }
+    chipEl.title = labelParts.join(" • ");
+
+    const thumbEl = document.createElement("div");
+    thumbEl.className = "clip-chip-thumb";
+    setClipChipBackground(thumbEl, clipChipPreviewUrl(chip));
+    chipEl.appendChild(thumbEl);
+
+    if (chip.status === "pending") {
+      const spinner = document.createElement("div");
+      spinner.className = "clip-chip-spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      chipEl.appendChild(spinner);
+    }
+
+    const actionsEl = document.createElement("div");
+    actionsEl.className = "clip-chip-actions";
+
+    const toggleBtn = document.createElement("button");
+    toggleBtn.type = "button";
+    toggleBtn.className = "clip-chip-action clip-chip-toggle";
+    toggleBtn.dataset.action = "toggle";
+    toggleBtn.dataset.id = String(chip.id);
+    toggleBtn.title = chip.negative
+      ? "Use as positive reference"
+      : "Use as negative reference";
+    toggleBtn.setAttribute(
+      "aria-label",
+      chip.negative ? "Use as positive reference" : "Use as negative reference",
+    );
+    toggleBtn.textContent = chip.negative ? "+" : "-";
+    const toggleDisabled =
+      chip.status !== "ready" && chip.kind !== "gallery"
+        ? true
+        : chip.kind === "upload" && !(chip.vector instanceof Float32Array);
+    toggleBtn.disabled = !!toggleDisabled;
+    actionsEl.appendChild(toggleBtn);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "clip-chip-action clip-chip-remove";
+    removeBtn.dataset.action = "remove";
+    removeBtn.dataset.id = String(chip.id);
+    removeBtn.title = "Remove image";
+    removeBtn.setAttribute("aria-label", "Remove image");
+    removeBtn.textContent = "x";
+    actionsEl.appendChild(removeBtn);
+
+    chipEl.appendChild(actionsEl);
+    clipChipContainer.appendChild(chipEl);
+  });
+  updateClipSearchClearVisibility();
+}
+
+async function handleClipPaste(event) {
+  if (!clipEnabled) return;
+  const clipboard = event.clipboardData;
+  if (!clipboard) return;
+  const files = Array.from(clipboard.files || []).filter(
+    (file) =>
+      file && typeof file.type === "string" && file.type.startsWith("image/"),
+  );
+  if (!files.length) return;
+  event.preventDefault();
+  for (const file of files) {
+    // eslint-disable-next-line no-await-in-loop
+    await startClipUploadSearch(file);
+  }
+}
+
+if (clipSearchInput) {
+  clipSearchInput.addEventListener("paste", (event) => {
+    handleClipPaste(event);
+  });
+}
+
+function addClipChip(entry) {
+  const chip = {
+    id: clipChipState.seq++,
+    kind: entry.kind,
+    imageId: Number.isFinite(entry.imageId) ? Number(entry.imageId) : null,
+    token: entry.token || entry.clipToken || null,
+    label: entry.label || "",
+    negative: !!entry.negative,
+    status: entry.status || "pending",
+    thumbnail: entry.thumbnail || null,
+    previewUrl: entry.previewUrl || null,
+    vector:
+      entry.vector instanceof Float32Array
+        ? entry.vector
+        : base64ToFloat32Vector(entry.vector),
+    vectorCache: {},
+    uploadData: entry.uploadData || null,
+  };
+  if (!(chip.vector instanceof Float32Array)) {
+    chip.vector = null;
+  }
+  clipChipState.items.push(chip);
+  renderClipChips();
+  return chip;
+}
+
+function findClipChipById(chipId) {
+  return clipChipState.items.find((chip) => chip && chip.id === chipId) || null;
+}
+
+function updateClipChip(chipId, updates = {}, { silent = false } = {}) {
+  const chip = findClipChipById(chipId);
+  if (!chip) return null;
+  if ("vector" in updates) {
+    const vector =
+      updates.vector instanceof Float32Array
+        ? updates.vector
+        : base64ToFloat32Vector(updates.vector);
+    chip.vector = vector instanceof Float32Array ? vector : null;
+    chip.vectorCache = {};
+  }
+  if ("thumbnail" in updates) {
+    chip.thumbnail = updates.thumbnail || null;
+  }
+  if ("previewUrl" in updates) {
+    if (chip.previewUrl && chip.previewUrl !== updates.previewUrl) {
+      destroyClipChipPreview(chip);
+    }
+    chip.previewUrl = updates.previewUrl || chip.previewUrl;
+  }
+  if ("token" in updates || "clipToken" in updates) {
+    const nextToken =
+      typeof updates.token === "string" && updates.token
+        ? updates.token
+        : typeof updates.clipToken === "string" && updates.clipToken
+          ? updates.clipToken
+          : null;
+    chip.token = nextToken;
+    if (chip.token) {
+      removeClipChips(
+        (other) => other.id !== chip.id && other.token === chip.token,
+        { silent: true },
+      );
+    }
+  }
+  if ("uploadData" in updates) {
+    chip.uploadData = updates.uploadData || null;
+  }
+  if ("label" in updates) {
+    chip.label = updates.label || "";
+  }
+  if ("negative" in updates) {
+    chip.negative = !!updates.negative;
+  }
+  if ("status" in updates) {
+    chip.status = updates.status || "pending";
+  }
+  if ("imageId" in updates) {
+    chip.imageId = Number.isFinite(updates.imageId)
+      ? Number(updates.imageId)
+      : chip.imageId;
+  }
+  if (!silent) {
+    renderClipChips();
+  } else {
+    updateClipSearchClearVisibility();
+  }
+  return chip;
+}
+
+function removeClipChip(chipId, { silent = false } = {}) {
+  const nextItems = [];
+  clipChipState.items.forEach((chip) => {
+    if (!chip) return;
+    if (chip.id === chipId) {
+      destroyClipChipPreview(chip);
+      return;
+    }
+    nextItems.push(chip);
+  });
+  clipChipState.items = nextItems;
+  if (!silent) {
+    renderClipChips();
+  } else {
+    updateClipSearchClearVisibility();
+  }
+}
+
+function clearClipChips({ silent = false } = {}) {
+  clipChipState.items.forEach((chip) => destroyClipChipPreview(chip));
+  clipChipState.items = [];
+  if (!silent) {
+    renderClipChips();
+  } else {
+    updateClipSearchClearVisibility();
+  }
+}
+
+function removeClipChips(predicate, { silent = false } = {}) {
+  if (typeof predicate !== "function") return;
+  const next = [];
+  clipChipState.items.forEach((chip) => {
+    if (!chip) return;
+    if (predicate(chip)) {
+      destroyClipChipPreview(chip);
+    } else {
+      next.push(chip);
+    }
+  });
+  clipChipState.items = next;
+  if (!silent) {
+    renderClipChips();
+  } else {
+    updateClipSearchClearVisibility();
+  }
+}
+
+function exportClipChips() {
+  return clipChipState.items.map((chip) => ({
+    kind: chip.kind,
+    imageId: chip.imageId,
+    negative: chip.negative,
+    token: chip.token || null,
+    label: chip.label,
+    status: chip.status,
+  }));
+}
+
+function rebuildClipChipsFromSnapshot(snapshot) {
+  clearClipChips({ silent: true });
+  const source = Array.isArray(snapshot) ? snapshot : [];
+  const missingUploads = [];
+  source.forEach((entry) => {
+    if (!entry || typeof entry !== "object") {
+      return;
+    }
+    if (entry.kind === "upload") {
+      const token = entry.token || entry.clipToken || null;
+      if (!token) {
+        missingUploads.push(entry.label || "pasted image");
+        return;
+      }
+      const cache = ClipState.readUpload(token, { touch: true });
+      if (!cache || typeof cache.vector !== "string" || !cache.vector) {
+        missingUploads.push(entry.label || "pasted image");
+        return;
+      }
+      const vector = base64ToFloat32Vector(cache.vector);
+      if (!(vector instanceof Float32Array)) {
+        missingUploads.push(entry.label || "pasted image");
+        return;
+      }
+      const thumbnailData =
+        entry.thumbnail ||
+        (cache.thumbnail
+          ? cache.thumbnail.startsWith("data:")
+            ? cache.thumbnail
+            : `data:image/png;base64,${cache.thumbnail}`
+          : null);
+      addClipChip({
+        kind: "upload",
+        token,
+        negative: !!entry.negative,
+        vector,
+        label: entry.label || cache.label || "pasted image",
+        thumbnail: thumbnailData,
+        status: "ready",
+      });
+      return;
+    }
+    addClipChip({
+      kind: entry.kind,
+      imageId: entry.imageId,
+      negative: entry.negative,
+      label: entry.label,
+      status: entry.status || "ready",
+    });
+  });
+  renderClipChips();
+  if (missingUploads.length) {
+    showToast("clip-upload-missing", {
+      title: "Missing image uploads",
+      body:
+        missingUploads.length === 1
+          ? `${missingUploads[0]} was not cached; removed from CLIP query.`
+          : `${missingUploads.length} cached uploads were unavailable and removed from the CLIP query.`,
+      variant: "error",
+      autoDismiss: 0,
+    });
+  }
+}
+
+function buildClipSearchPayloadFromState(overrides = {}) {
+  const {
+    tagQuery: overrideTagQuery,
+    query: overrideTextQuery,
+    chipsSnapshot: _ignoredSnapshot,
+    ...payloadOverrides
+  } = overrides || {};
+  const tagQuery =
+    typeof overrideTagQuery === "string"
+      ? overrideTagQuery
+      : (searchBox?.value || "").trim();
+  const textQuery =
+    typeof overrideTextQuery === "string"
+      ? overrideTextQuery
+      : (clipSearchInput?.value || "").trim();
+  const positiveIds = new Set();
+  const negativeIds = new Set();
+  const positiveVectors = [];
+  const negativeVectors = [];
+  const removedUploads = [];
+  const chipsToRemove = [];
+  let pendingUploads = false;
+
+  clipChipState.items.forEach((chip) => {
+    if (!chip) return;
+    if (chip.kind === "gallery" && Number.isFinite(chip.imageId)) {
+      if (chip.negative) {
+        negativeIds.add(Number(chip.imageId));
+      } else {
+        positiveIds.add(Number(chip.imageId));
+      }
+      return;
+    }
+    if (chip.kind !== "upload") {
+      return;
+    }
+
+    if (!(chip.vector instanceof Float32Array)) {
+      const cache =
+        chip.token && typeof chip.token === "string"
+          ? ClipState.readUpload(chip.token, { touch: true })
+          : null;
+      if (cache && typeof cache.vector === "string" && cache.vector) {
+        const cachedVector = base64ToFloat32Vector(cache.vector);
+        if (cachedVector instanceof Float32Array) {
+          const cachedThumb =
+            chip.thumbnail ||
+            (cache.thumbnail
+              ? cache.thumbnail.startsWith("data:")
+                ? cache.thumbnail
+                : `data:image/png;base64,${cache.thumbnail}`
+              : null);
+          updateClipChip(
+            chip.id,
+            {
+              vector: cachedVector,
+              thumbnail: cachedThumb || chip.thumbnail,
+              status: "ready",
+            },
+            { silent: true },
+          );
+        }
+      }
+    }
+
+    if (chip.vector instanceof Float32Array) {
+      const encoded = getChipVectorBase64(chip);
+      if (encoded) {
+        if (chip.negative) {
+          negativeVectors.push(encoded);
+        } else {
+          positiveVectors.push(encoded);
+        }
+      }
+      return;
+    }
+
+    if (chip.status === "pending" || !chip.token) {
+      pendingUploads = true;
+      return;
+    }
+
+    chipsToRemove.push(chip.id);
+    removedUploads.push(chip.label || "pasted image");
+  });
+
+  if (chipsToRemove.length) {
+    chipsToRemove.forEach((chipId) =>
+      removeClipChip(chipId, { silent: true }),
+    );
+    renderClipChips();
+    updateClipSearchClearVisibility();
+    console.warn("[clip] Removed chips after cache check", {
+      removedCount: chipsToRemove.length,
+      removedUploads,
+    });
+  }
+
+  const snapshot = exportClipChips();
+
+  const payload = {
+    query: textQuery,
+    positiveImages: Array.from(positiveIds),
+    negativeImages: Array.from(negativeIds),
+    tagQuery,
+    chipsSnapshot: snapshot,
+  };
+  if (positiveVectors.length) {
+    payload.positiveVectors = positiveVectors;
+  }
+  if (negativeVectors.length) {
+    payload.negativeVectors = negativeVectors;
+  }
+  return {
+    payload: { ...payload, ...payloadOverrides },
+    removedUploads,
+    pendingUploads,
+  };
+}
+
+function triggerClipSearchFromState(options = {}) {
+  const { payload, removedUploads, pendingUploads } = buildClipSearchPayloadFromState(
+    options.payloadOverrides,
+  );
+  if (removedUploads.length) {
+    showToast("clip-upload-removed", {
+      title: "Removed cached uploads",
+      body:
+        removedUploads.length === 1
+          ? `${removedUploads[0]} was removed because its cached data is unavailable.`
+          : `${removedUploads.length} uploads were removed because their cached data is unavailable.`,
+      variant: "error",
+      autoDismiss: 0,
+    });
+    const sanitizedSnapshot = exportClipChips();
+    const sanitizedToken =
+      ClipState.encodeQuery({
+        query:
+          (payload && typeof payload.query === "string" && payload.query) ||
+          lastQuery ||
+          "",
+        chips: sanitizedSnapshot,
+      }) || null;
+    pushHistoryState(
+      {
+        clip: sanitizedToken,
+        clipSnapshot: sanitizedSnapshot.length ? sanitizedSnapshot : null,
+        pos: sanitizedToken ? currentHistoryState.pos : 0,
+      },
+      { replace: true },
+    );
+    console.warn("[clip] Removed cached uploads", {
+      removedUploads,
+      sanitizedToken,
+      sanitizedSnapshotLength: sanitizedSnapshot.length,
+    });
+    currentClipToken = sanitizedToken;
+    if (!sanitizedToken) {
+      clipModeActive = false;
+      lastClipPayload = null;
+      currentClipToken = null;
+      clipOffset = 0;
+      clipTotal = 0;
+      if (clipSearchInput) {
+        clipSearchInput.value = "";
+        updateClipSearchClearVisibility();
+      }
+      pendingScrollIndex = 0;
+      scrollRestorePending = false;
+      fetchImages(true);
+      return Promise.resolve();
+    }
+  }
+  if (pendingUploads) {
+    statusEl.textContent = "Processing image…";
+    return Promise.resolve();
+  }
+  if (!payload) {
+    return Promise.resolve();
+  }
+  return runClipSearch(payload, options);
+}
+
+function scheduleClipSearch({
+  debounce = true,
+  append = false,
+  updateHistory = true,
+  payloadOverrides = undefined,
+} = {}) {
+  pendingClipSearchOptions = {
+    append,
+    updateHistory,
+    payloadOverrides,
+  };
+  if (clipSearchTimer) {
+    clearTimeout(clipSearchTimer);
+    clipSearchTimer = null;
+  }
+  const delay = debounce ? CLIP_SEARCH_DEBOUNCE : 0;
+  clipSearchTimer = setTimeout(() => {
+    clipSearchTimer = null;
+    if (searchState.loading) {
+      return;
+    }
+    const nextOptions = pendingClipSearchOptions || {
+      append: false,
+      updateHistory: true,
+      payloadOverrides,
+    };
+    pendingClipSearchOptions = null;
+    triggerClipSearchFromState(nextOptions);
+  }, delay);
+}
+
+function exitClipMode({ fetch = true } = {}) {
+  if (!clipModeActive) {
+    lastClipPayload = null;
+    currentClipToken = null;
+    if (!fetch) {
+      pushHistoryState({ clip: null, clipSnapshot: null }, { replace: true });
+    }
+    updateClipSearchClearVisibility();
+    clipModeActive = false;
+    return;
+  }
+  if (clipSearchTimer) {
+    clearTimeout(clipSearchTimer);
+    clipSearchTimer = null;
+  }
+  pendingClipSearchOptions = null;
+  if (detailOverlay.classList.contains("active")) {
+    closeDetail({ skipHistory: true });
+  }
+  clipModeActive = false;
+  lastClipPayload = null;
+  currentClipToken = null;
+  clipOffset = 0;
+  clipTotal = 0;
+  pendingDetailId = null;
+  if (fetch) {
+    pushHistoryState(
+      { query: lastQuery, detail: null, pos: 0, clip: null, clipSnapshot: null },
+      { replace: true },
+    );
+    fetchImages(true);
+  } else {
+    pushHistoryState({ clip: null, clipSnapshot: null }, { replace: true });
+  }
+  updateStatus();
+}
+
+if (clipChipContainer) {
+  clipChipContainer.addEventListener("click", (event) => {
+    const actionButton = event.target.closest(".clip-chip-action");
+    if (!actionButton) return;
+    const chipId = Number(actionButton.dataset.id);
+    if (!Number.isFinite(chipId)) return;
+    const action = actionButton.dataset.action;
+    if (action === "remove") {
+      removeClipChip(chipId);
+      updateClipSearchClearVisibility();
+      const hasText = !!(clipSearchInput && clipSearchInput.value.trim());
+      if (!hasText && clipChipState.items.length === 0) {
+        const shouldFetch = clipModeActive && !searchState.loading;
+        exitClipMode({ fetch: shouldFetch });
+        return;
+      }
+      scheduleClipSearch({ debounce: false, append: false, updateHistory: true });
+    } else if (action === "toggle") {
+      const chip = findClipChipById(chipId);
+      if (!chip) return;
+      if (chip.kind === "upload" && chip.status !== "ready") return;
+      updateClipChip(chipId, { negative: !chip.negative });
+      scheduleClipSearch({ debounce: false, append: false, updateHistory: true });
+    }
+  });
 }
 
 function syncClearButton(input, button) {
@@ -694,134 +1361,174 @@ async function startClipUploadSearch(file) {
     statusEl.textContent = "Please drop an image file";
     return;
   }
-  if (searchState.loading) {
-    statusEl.textContent = "Another search is in progress…";
-    return;
+  const label = truncateLabel(file.name || "upload", 36);
+  let previewUrl = null;
+  try {
+    previewUrl = URL.createObjectURL(file);
+  } catch (err) {
+    console.debug("Unable to create preview for clip upload", err);
   }
 
-  const tagFilter = searchBox.value.trim();
-  lastQuery = tagFilter;
-  clipModeActive = true;
-  currentClipToken = null;
-  pendingDetailId = null;
-  resetState(lastQuery, { clearClip: false });
-  clipOffset = 0;
-  clipTotal = 0;
-  scrollRestorePending = true;
-  pendingScrollIndex = 0;
-  lastAnchorIndex = 0;
+  removeClipChips(
+    (chip) =>
+      chip.kind === "upload" &&
+      (!chip.token || chip.label === label || chip.status !== "ready"),
+    { silent: true },
+  );
+
+  const chip = addClipChip({
+    kind: "upload",
+    label,
+    previewUrl,
+    status: "pending",
+    negative: false,
+  });
+
   statusEl.textContent = "Processing image…";
-  searchState.loading = true;
-  if (clipSearchClear) clipSearchClear.disabled = true;
-  if (detailSimilarBtn) detailSimilarBtn.disabled = true;
 
   const formData = new FormData();
   formData.append("file", file, file.name || "upload");
-  formData.append("limit", String(PAGE_SIZE));
-  formData.append("offset", "0");
-  if (tagFilter) formData.append("tag_query", tagFilter);
-  formData.append("include_tags", "0");
 
   try {
-    const res = await fetch("/api/search/clip/file", {
+    const res = await fetch("/api/clip/embed", {
       method: "POST",
       body: formData,
     });
-    if (!res.ok) throw new Error(`clip upload failed: ${res.status}`);
+    if (!res.ok) throw new Error(`clip embed failed: ${res.status}`);
     const data = await res.json();
-    const vector =
+    const vectorString =
       typeof data.vector === "string" && data.vector ? data.vector : null;
-    const uploadLabel = file.name ? `image:${file.name}` : "uploaded image";
+    const vector = vectorString ? base64ToFloat32Vector(vectorString) : null;
+    const vectorId =
+      typeof data.vector_id === "string" && data.vector_id
+        ? data.vector_id
+        : null;
+    const thumbnail =
+      typeof data.thumbnail === "string" && data.thumbnail
+        ? `data:image/png;base64,${data.thumbnail}`
+        : null;
+    const filename =
+      typeof data.filename === "string" && data.filename
+        ? truncateLabel(data.filename, 36)
+        : label;
 
-    lastClipPayload = {
-      query: "",
-      positiveImages: [],
-      negativeImages: [],
-      tagQuery: tagFilter,
-      updateInput: uploadLabel,
-      positiveVector: vector,
-    };
+    if (!(vector instanceof Float32Array)) {
+      throw new Error("Missing CLIP vector for upload");
+    }
 
-    const results = Array.isArray(data.results) ? data.results : [];
-    const newImageIds = [];
-    results.forEach((item) => {
-      const idx = searchState.images.length;
-      searchState.images.push(item);
-      searchState.index.set(item.id, idx);
-      const template = document.createElement("template");
-      template.innerHTML = renderCard(item).trim();
-      const cardEl = template.content.firstElementChild;
-      registerCardElement(cardEl, item);
-      gridEl.appendChild(cardEl);
-      if (Number.isFinite(item.id)) {
-        newImageIds.push(Number(item.id));
-      }
+    const clipToken = vectorId || ClipState.createUploadToken();
+    ClipState.recordUpload(clipToken, {
+      vector: vectorString,
+      thumbnail:
+        typeof data.thumbnail === "string" && data.thumbnail
+          ? data.thumbnail
+          : null,
+      label: filename,
+      mimeType:
+        typeof data.mime_type === "string" && data.mime_type
+          ? data.mime_type
+          : file.type || "",
+      size: Number.isFinite(file.size) ? Number(file.size) : null,
     });
-
-    clipTotal = data.total ?? results.length ?? 0;
-    clipOffset = results.length;
-    searchState.total = clipTotal;
-    searchState.done = clipOffset >= clipTotal;
-    loadMoreBtn.style.display = searchState.done ? "none" : "block";
-
-    const computedFacets = buildClipFacetSummaryFromImageTags(
-      searchState.imageTags,
+    if (thumbnail) {
+      destroyClipChipPreview(chip);
+    }
+    updateClipChip(
+      chip.id,
+      {
+        vector,
+        token: clipToken,
+        thumbnail,
+        status: "ready",
+        label: filename,
+      },
+      { silent: true },
     );
-    if (computedFacets.length) {
-      facetCache = computedFacets;
-    } else {
-      facetCache = computeFacetsFromCurrentImages();
-    }
-    renderFacets(facetCache);
-
-    if (clipModeActive && newImageIds.length) {
-      loadTagsForImageIds(newImageIds);
-    }
-
-    if (clipSearchInput) {
-      clipSearchInput.value = uploadLabel;
-    }
-    updateStatus();
-    pushHistoryState(
-      { query: lastQuery, detail: null, pos: 0, clip: null },
-      { replace: true },
-    );
+    renderClipChips();
+    clipModeActive = true;
+    lastClipPayload = null;
+    currentClipToken = null;
+    clipOffset = 0;
+    clipTotal = 0;
+    scheduleClipSearch({ debounce: false, append: false, updateHistory: true });
   } catch (err) {
     console.error("Image similarity search failed", err);
     statusEl.textContent = "Image search failed";
-    resetState(lastQuery, { clearClip: false });
-    clipOffset = 0;
-    clipTotal = 0;
-    clipModeActive = false;
-    lastClipPayload = null;
-    currentClipToken = null;
-  } finally {
-    searchState.loading = false;
-    if (clipSearchClear) clipSearchClear.disabled = false;
-    if (detailSimilarBtn) detailSimilarBtn.disabled = false;
-    scheduleScrollSave();
+    removeClipChip(chip.id);
   }
 }
 
 function buildClipPayloadFromToken(token, tagQuery) {
-  const decoded = decodeClipState(token);
+  const decoded = ClipState.decodeQuery(token);
   if (!decoded) return null;
-  if (decoded.mode === "image" && Number.isFinite(decoded.id)) {
-    const id = Number(decoded.id);
-    return {
-      positiveImages: [id],
-      tagQuery,
-      updateInput: `image:${id}`,
-    };
-  }
-  if (decoded.mode === "text") {
-    const text = (decoded.query || "").trim();
+
+  const applyDecodedState = (details) => {
+    const positiveImages = Array.isArray(details.positiveImages)
+      ? details.positiveImages.map(Number).filter(Number.isFinite)
+      : [];
+    const negativeImages = Array.isArray(details.negativeImages)
+      ? details.negativeImages.map(Number).filter(Number.isFinite)
+      : [];
+    const uploads = Array.isArray(details.uploads) ? details.uploads : [];
+    const text = typeof details.query === "string" ? details.query.trim() : "";
+
+    const snapshot = [];
+    positiveImages.forEach((id) => {
+      snapshot.push({ kind: "gallery", imageId: id, negative: false });
+    });
+    negativeImages.forEach((id) => {
+      snapshot.push({ kind: "gallery", imageId: id, negative: true });
+    });
+    uploads.forEach((entry) => {
+      if (!entry || typeof entry.token !== "string" || !entry.token) return;
+      const cache = ClipState.readUpload(entry.token, { touch: true });
+      snapshot.push({
+        kind: "upload",
+        token: entry.token,
+        negative: !!entry.negative,
+        label:
+          typeof entry.label === "string" && entry.label
+            ? entry.label
+            : cache && typeof cache.label === "string"
+              ? cache.label
+              : "",
+      });
+    });
+
+    clearClipChips({ silent: true });
+    if (snapshot.length) {
+      rebuildClipChipsFromSnapshot(snapshot);
+    } else {
+      renderClipChips();
+    }
+    if (clipSearchInput) {
+      clipSearchInput.value = text;
+    }
+    updateClipSearchClearVisibility();
+    console.warn("[clip] applyDecodedState rebuilt chips", {
+      positiveImages,
+      negativeImages,
+      uploadCount: uploads.length,
+      snapshotSize: snapshot.length,
+    });
     return {
       query: text,
+      positiveImages,
+      negativeImages,
       tagQuery,
       updateInput: text,
+      chipsSnapshot: exportClipChips(),
     };
+  };
+
+  if (decoded.mode === "legacy") {
+    return applyDecodedState(decoded);
   }
+
+  if (decoded.mode === "tokens" || decoded.mode === "empty") {
+    return applyDecodedState(decoded);
+  }
+
   return null;
 }
 
@@ -831,11 +1538,15 @@ function parseStateFromLocation() {
   const detailParam = params.get("detail");
   const posParam = params.get("pos");
   const clipParam = params.get("clip");
+  const snapshot = ClipState.readSnapshotForUrl(
+    `${window.location.pathname}${window.location.search}`,
+  );
   return {
     query,
     detail: normalizeDetail(detailParam),
     pos: normalizeIndex(posParam),
     clip: clipParam || null,
+    clipSnapshot: snapshot,
   };
 }
 
@@ -871,11 +1582,22 @@ function pushHistoryState(state, { replace = false } = {}) {
       : normalizeIndex(currentHistoryState.pos);
   const clipValue =
     state.clip !== undefined ? state.clip : (currentHistoryState.clip ?? null);
+  const clipSnapshotValue =
+    state.clipSnapshot !== undefined
+      ? state.clipSnapshot
+      : clipModeActive
+        ? exportClipChips()
+        : null;
+  const normalizedSnapshot =
+    Array.isArray(clipSnapshotValue) && clipSnapshotValue.length
+      ? clipSnapshotValue
+      : null;
   const normalizedState = {
     query: queryValue,
     detail: detailValue,
     pos: posCandidate ?? 0,
     clip: clipValue || null,
+    clipSnapshot: normalizedSnapshot,
   };
   const url = buildUrlFromState(normalizedState);
   if (replace) {
@@ -885,6 +1607,7 @@ function pushHistoryState(state, { replace = false } = {}) {
   }
   currentHistoryState = normalizedState;
   currentClipToken = normalizedState.clip;
+  ClipState.stashSnapshotForUrl(url, normalizedSnapshot);
 }
 copyPositiveBtn.disabled = true;
 copyNegativeBtn.disabled = true;
@@ -1368,10 +2091,26 @@ function registerCardElement(cardEl, item) {
       const imageId = Number(similarBtn.dataset.id);
       if (!Number.isFinite(imageId)) return;
       if (!clipEnabled) return;
+      removeClipChips(
+        (chip) => chip.kind === "gallery" && chip.imageId === imageId,
+        { silent: true },
+      );
+      clearClipChips();
+      if (clipSearchInput) {
+        clipSearchInput.value = "";
+      }
+      updateClipSearchClearVisibility();
+      addClipChip({
+        kind: "gallery",
+        imageId,
+        label: `image:${imageId}`,
+        status: "ready",
+      });
       runClipSearch({
         positiveImages: [imageId],
         tagQuery: searchBox.value.trim(),
-        updateInput: `image:${imageId}`,
+        updateInput: "",
+        chipsSnapshot: exportClipChips(),
       });
     });
   }
@@ -1561,7 +2300,9 @@ async function runClipSearch(
     negativeImages = [],
     tagQuery = searchBox.value.trim(),
     updateInput,
-    positiveVector = null,
+    positiveVectors = [],
+    negativeVectors = [],
+    chipsSnapshot = null,
   } = {},
   { append = false, updateHistory = true } = {},
 ) {
@@ -1579,32 +2320,79 @@ async function runClipSearch(
 
   const originalQuery = typeof query === "string" ? query : "";
   const trimmedQuery = originalQuery.trim();
-  const posIds = Array.isArray(positiveImages)
-    ? positiveImages.map(Number).filter(Number.isFinite)
-    : [];
-  const negIds = Array.isArray(negativeImages)
-    ? negativeImages.map(Number).filter(Number.isFinite)
-    : [];
+  const posIds = Array.from(
+    new Set(
+      (Array.isArray(positiveImages) ? positiveImages : [])
+        .map(Number)
+        .filter(Number.isFinite),
+    ),
+  );
+  const negIds = Array.from(
+    new Set(
+      (Array.isArray(negativeImages) ? negativeImages : [])
+        .map(Number)
+        .filter(Number.isFinite),
+    ),
+  );
+  const normalizeVectorInput = (input) => {
+    const result = [];
+    const enqueue = (value) => {
+      if (!value) return;
+      if (value instanceof Float32Array) {
+        const encoded = float32ToBase64(value);
+        if (encoded) result.push(encoded);
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach(enqueue);
+        return;
+      }
+      if (typeof value === "string" && value) {
+        result.push(value);
+      }
+    };
+    enqueue(input);
+    return result;
+  };
+
+  const positiveVectorList = normalizeVectorInput(positiveVectors);
+  const negativeVectorList = normalizeVectorInput(negativeVectors);
+
   if (
     !trimmedQuery &&
     posIds.length === 0 &&
     negIds.length === 0 &&
-    !positiveVector
+    positiveVectorList.length === 0 &&
+    negativeVectorList.length === 0
   ) {
     statusEl.textContent = "Provide CLIP input";
     return;
   }
   if (updateInput !== undefined && clipSearchInput) {
     clipSearchInput.value = updateInput;
-    syncClearButton(clipSearchInput, clipSearchClear);
   }
+  updateClipSearchClearVisibility();
+
+  if (Array.isArray(chipsSnapshot)) {
+    rebuildClipChipsFromSnapshot(chipsSnapshot);
+  }
+  const chipStateSnapshot = exportClipChips();
 
   clipModeActive = true;
-  const clipToken =
-    encodeClipState({ query: trimmedQuery, positiveImages: posIds }) || null;
+  const historyClipToken =
+    ClipState.encodeQuery({
+      query: trimmedQuery,
+      chips: chipStateSnapshot,
+    }) || null;
+  ClipState.stashSnapshotForUrl(
+    `${window.location.pathname}${window.location.search}`,
+    chipStateSnapshot && chipStateSnapshot.length ? chipStateSnapshot : null,
+  );
+  const tagFilter = (tagQuery ?? lastQuery ?? "").trim();
   if (!append) {
     clipOffset = 0;
     clipTotal = 0;
+    lastQuery = tagFilter;
     resetState(lastQuery, { clearClip: false });
     if (!scrollRestorePending) {
       pendingScrollIndex = 0;
@@ -1617,11 +2405,14 @@ async function runClipSearch(
     facetCache = computeFacetsFromCurrentImages();
     renderFacets(facetCache);
   } else {
+    if (tagFilter) {
+      lastQuery = tagFilter;
+    }
     statusEl.textContent = "Loading clip results…";
   }
 
-  currentClipToken = clipToken ?? currentClipToken ?? null;
-
+  currentClipToken = historyClipToken ?? currentClipToken ?? null;
+  pendingDetailId = null;
   searchState.loading = true;
   if (!append) {
     statusEl.textContent = "CLIP search…";
@@ -1634,33 +2425,31 @@ async function runClipSearch(
     offset: append ? clipOffset : 0,
     include_tags: false,
   };
-  const tagFilter = (tagQuery || "").trim();
-  if (tagFilter) payload.tag_query = tagFilter;
+  if (lastQuery) payload.tag_query = lastQuery;
   if (trimmedQuery) payload.query = trimmedQuery;
   if (posIds.length) payload.positive_images = posIds;
   if (negIds.length) payload.negative_images = negIds;
-  if (positiveVector) payload.positive_vector = positiveVector;
-
+  if (positiveVectorList.length) {
+    payload.positive_vectors = positiveVectorList;
+  }
+  if (negativeVectorList.length) {
+    payload.negative_vectors = negativeVectorList;
+  }
+  delete payload.positiveVectors;
+  delete payload.negativeVectors;
   lastClipPayload = {
     query: trimmedQuery,
     positiveImages: posIds.slice(),
     negativeImages: negIds.slice(),
-    tagQuery: tagFilter,
+    tagQuery: lastQuery,
     updateInput:
       updateInput !== undefined
         ? updateInput
-        : originalQuery !== ""
-          ? originalQuery
-          : posIds.length
-            ? `image:${posIds[0]}`
-            : "",
-    positiveVector: positiveVector || null,
+        : originalQuery,
+    positiveVectors: positiveVectorList.slice(),
+    negativeVectors: negativeVectorList.slice(),
+    chipsSnapshot: chipStateSnapshot,
   };
-  if (clipToken) {
-    lastClipPayload.clipToken = clipToken;
-  } else {
-    delete lastClipPayload.clipToken;
-  }
 
   let queueMoreForScroll = false;
 
@@ -1731,7 +2520,8 @@ async function runClipSearch(
         query: lastQuery,
         detail: null,
         pos: anchorIndexForHistory,
-        clip: clipToken ?? null,
+        clip: historyClipToken ?? null,
+        clipSnapshot: chipStateSnapshot,
       });
     }
 
@@ -1755,6 +2545,7 @@ async function runClipSearch(
     console.error(err);
     statusEl.textContent = "CLIP search failed";
   } finally {
+    const queuedOptions = pendingClipSearchOptions;
     searchState.loading = false;
     if (clipSearchClear) clipSearchClear.disabled = false;
     if (detailSimilarBtn) detailSimilarBtn.disabled = false;
@@ -1772,6 +2563,15 @@ async function runClipSearch(
       }
     } else if (!append) {
       scheduleScrollSave();
+    }
+    if (!clipSearchTimer && queuedOptions) {
+      pendingClipSearchOptions = null;
+      scheduleClipSearch({
+        debounce: false,
+        append: queuedOptions.append,
+        updateHistory: queuedOptions.updateHistory,
+        payloadOverrides: queuedOptions.payloadOverrides,
+      });
     }
   }
 }
@@ -1891,12 +2691,14 @@ function scheduleScrollSave() {
     }
     lastAnchorIndex = anchorIndex;
     const clipTokenForHistory = getActiveClipToken();
+    const clipSnapshotForHistory = clipModeActive ? exportClipChips() : null;
     pushHistoryState(
       {
         query: lastQuery,
         detail: activeDetail,
         pos: anchorIndex,
         clip: clipTokenForHistory,
+        clipSnapshot: clipSnapshotForHistory,
       },
       { replace: true },
     );
@@ -1977,19 +2779,29 @@ function commitSearch(rawValue, { pushHistory = true } = {}) {
       ...lastClipPayload,
       tagQuery: nextQuery,
     };
-    if (lastClipPayload.clipToken) {
-      payload.clipToken = lastClipPayload.clipToken;
-    }
     lastClipPayload = payload;
     const clipToken = getActiveClipToken();
+    const clipSnapshotForHistory = exportClipChips();
     if (pushHistory) {
       pushHistoryState(
-        { query: nextQuery, detail: null, pos: 0, clip: clipToken },
+        {
+          query: nextQuery,
+          detail: null,
+          pos: 0,
+          clip: clipToken,
+          clipSnapshot: clipSnapshotForHistory,
+        },
         { replace: sameQuery },
       );
     } else {
       pushHistoryState(
-        { query: nextQuery, detail: null, pos: 0, clip: clipToken },
+        {
+          query: nextQuery,
+          detail: null,
+          pos: 0,
+          clip: clipToken,
+          clipSnapshot: clipSnapshotForHistory,
+        },
         { replace: true },
       );
     }
@@ -1999,17 +2811,23 @@ function commitSearch(rawValue, { pushHistory = true } = {}) {
   if (sameQuery) {
     if (pushHistory) {
       pushHistoryState(
-        { query: nextQuery, detail: null, pos: 0, clip: null },
+        { query: nextQuery, detail: null, pos: 0, clip: null, clipSnapshot: null },
         { replace: true },
       );
     }
     return;
   }
   if (pushHistory) {
-    pushHistoryState({ query: nextQuery, detail: null, pos: 0, clip: null });
+    pushHistoryState({
+      query: nextQuery,
+      detail: null,
+      pos: 0,
+      clip: null,
+      clipSnapshot: null,
+    });
   } else {
     pushHistoryState(
-      { query: nextQuery, detail: null, pos: 0, clip: null },
+      { query: nextQuery, detail: null, pos: 0, clip: null, clipSnapshot: null },
       { replace: true },
     );
   }
@@ -2172,69 +2990,66 @@ if (clipSearchInput) {
       event.preventDefault();
       if (!clipEnabled) return;
       const rawQuery = clipSearchInput.value;
-      if (!rawQuery.trim() && lastClipPayload) {
-        runClipSearch(lastClipPayload, { append: false });
-      } else {
-        runClipSearch({ query: rawQuery, tagQuery: searchBox.value.trim() });
+      const hasChips = clipChipState.items.length > 0;
+      if (!rawQuery.trim() && !hasChips) {
+        if (lastClipPayload) {
+          runClipSearch(lastClipPayload, { append: false, updateHistory: false });
+        }
+        return;
       }
+      scheduleClipSearch({ debounce: false, append: false, updateHistory: true });
     }
   });
   clipSearchInput.addEventListener("input", () => {
     if (!clipEnabled) return;
-    syncClearButton(clipSearchInput, clipSearchClear);
-    if (clipSearchTimer) {
-      clearTimeout(clipSearchTimer);
-      clipSearchTimer = null;
-    }
+    updateClipSearchClearVisibility();
     const rawQuery = clipSearchInput.value;
-    const trimmed = rawQuery.trim();
-    if (!trimmed) {
-      if (clipModeActive && !searchState.loading) {
-        clipModeActive = false;
-        lastClipPayload = null;
-        currentClipToken = null;
-        clipOffset = 0;
-        clipTotal = 0;
-        pushHistoryState(
-          { query: lastQuery, detail: null, pos: 0, clip: null },
-          { replace: true },
-        );
-        fetchImages(true);
+    if (!rawQuery.trim()) {
+      updateClipSearchClearVisibility();
+      if (clipChipState.items.length === 0) {
+        if (clipModeActive && !searchState.loading) {
+          exitClipMode({ fetch: true });
+        }
+      } else {
+        scheduleClipSearch({ debounce: false, append: false, updateHistory: true });
       }
       return;
     }
-    clipSearchTimer = setTimeout(() => {
-      if (!searchState.loading) {
-        runClipSearch({ query: rawQuery, tagQuery: searchBox.value.trim() });
-      }
-    }, CLIP_SEARCH_DEBOUNCE);
+    scheduleClipSearch({ debounce: true, append: false, updateHistory: true });
   });
-  syncClearButton(clipSearchInput, clipSearchClear);
+  clipSearchInput.addEventListener("paste", async (event) => {
+    if (!clipEnabled) return;
+    const clipboard = event.clipboardData;
+    if (!clipboard) return;
+    const files = Array.from(clipboard.files || []).filter(
+      (file) =>
+        file && typeof file.type === "string" && file.type.toLowerCase().startsWith("image/"),
+    );
+    if (!files.length) return;
+    event.preventDefault();
+    for (const file of files) {
+      // eslint-disable-next-line no-await-in-loop
+      await startClipUploadSearch(file);
+    }
+  });
+  updateClipSearchClearVisibility();
 }
 if (clipSearchClear) {
   clipSearchClear.addEventListener("click", () => {
     if (clipSearchInput) {
       clipSearchInput.value = "";
-      syncClearButton(clipSearchInput, clipSearchClear);
     }
+    clearClipChips();
+    if (clipSearchTimer) {
+      clearTimeout(clipSearchTimer);
+      clipSearchTimer = null;
+    }
+    pendingClipSearchOptions = null;
+    updateClipSearchClearVisibility();
     if (clipModeActive && !searchState.loading) {
-      if (detailOverlay.classList.contains("active")) {
-        closeDetail({ skipHistory: true });
-      }
-      clipModeActive = false;
-      lastClipPayload = null;
-      currentClipToken = null;
-      clipOffset = 0;
-      clipTotal = 0;
-      pushHistoryState({ query: lastQuery, detail: null, pos: 0, clip: null });
-      fetchImages(true);
+      exitClipMode({ fetch: true });
     } else {
-      clipModeActive = false;
-      lastClipPayload = null;
-      currentClipToken = null;
-      clipOffset = 0;
-      clipTotal = 0;
-      pushHistoryState({ clip: null }, { replace: true });
+      exitClipMode({ fetch: false });
     }
     clipSearchInput?.focus();
   });
@@ -2304,7 +3119,7 @@ window.addEventListener("dragleave", (event) => {
   }
 });
 
-window.addEventListener("drop", (event) => {
+window.addEventListener("drop", async (event) => {
   if (!isFileDrag(event)) return;
   event.preventDefault();
   dragCounter = 0;
@@ -2313,7 +3128,13 @@ window.addEventListener("drop", (event) => {
     ? Array.from(event.dataTransfer.files || [])
     : [];
   if (!files.length) return;
-  startClipUploadSearch(files[0]);
+  for (const file of files) {
+    if (!file || !file.type || !file.type.toLowerCase().startsWith("image/")) {
+      continue;
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await startClipUploadSearch(file);
+  }
 });
 
 gridEl.addEventListener("click", (event) => {
@@ -2331,10 +3152,22 @@ if (detailSimilarBtn) {
     if (!clipEnabled) return;
     const tagFilter = searchBox.value.trim();
     closeDetail({ skipHistory: true });
+    clearClipChips();
+    if (clipSearchInput) {
+      clipSearchInput.value = "";
+    }
+    updateClipSearchClearVisibility();
+    addClipChip({
+      kind: "gallery",
+      imageId,
+      label: `image:${imageId}`,
+      status: "ready",
+    });
     runClipSearch({
       positiveImages: [imageId],
       tagQuery: tagFilter,
-      updateInput: `image:${imageId}`,
+      updateInput: "",
+      chipsSnapshot: exportClipChips(),
     });
   });
 }
@@ -2494,12 +3327,22 @@ async function openDetail(id, options = {}) {
   ) {
     if (pushState) {
       pushHistoryState(
-        { query: lastQuery, detail: detailId, clip: clipTokenForHistory },
+        {
+          query: lastQuery,
+          detail: detailId,
+          clip: clipTokenForHistory,
+          clipSnapshot: clipModeActive ? exportClipChips() : null,
+        },
         { replace: true },
       );
     } else if (replaceState) {
       pushHistoryState(
-        { query: lastQuery, detail: detailId, clip: clipTokenForHistory },
+        {
+          query: lastQuery,
+          detail: detailId,
+          clip: clipTokenForHistory,
+          clipSnapshot: clipModeActive ? exportClipChips() : null,
+        },
         { replace: true },
       );
     }
@@ -2614,6 +3457,7 @@ async function openDetail(id, options = {}) {
         detail: detailId,
         pos: anchorIndexForHistory,
         clip: clipTokenForHistory,
+        clipSnapshot: clipModeActive ? exportClipChips() : null,
       });
     } else if (replaceState) {
       pushHistoryState(
@@ -2622,6 +3466,7 @@ async function openDetail(id, options = {}) {
           detail: detailId,
           pos: anchorIndexForHistory,
           clip: clipTokenForHistory,
+          clipSnapshot: clipModeActive ? exportClipChips() : null,
         },
         { replace: true },
       );
@@ -3006,6 +3851,7 @@ function closeDetail({ skipHistory = false } = {}) {
       detail: null,
       pos: anchorIndexForHistory,
       clip: clipTokenForHistory,
+      clipSnapshot: clipModeActive ? exportClipChips() : null,
     });
   }
 }
@@ -3019,6 +3865,10 @@ function handleHistoryState(state) {
     typeof safeState.clip === "string" && safeState.clip
       ? safeState.clip
       : null;
+  const snapshot =
+    Array.isArray(safeState.clipSnapshot) && safeState.clipSnapshot.length
+      ? safeState.clipSnapshot
+      : null;
   const normalizedCurrentClip = currentClipToken || null;
   const clipChanged = nextClipToken !== normalizedCurrentClip;
   const queryChanged = nextQuery !== lastQuery;
@@ -3030,6 +3880,7 @@ function handleHistoryState(state) {
     detail: nextDetail,
     pos: nextPos ?? 0,
     clip: nextClipToken,
+    clipSnapshot: snapshot,
   };
 
   if (searchBox.value !== nextQuery) {
@@ -3052,8 +3903,8 @@ function handleHistoryState(state) {
       clipOffset = 0;
       clipTotal = 0;
       if (clipSearchInput) clipSearchInput.value = "";
-      syncClearButton(clipSearchInput, clipSearchClear);
-      pushHistoryState({ clip: null }, { replace: true });
+      updateClipSearchClearVisibility();
+      pushHistoryState({ clip: null, clipSnapshot: null }, { replace: true });
     } else {
       const wasClipMode = clipModeActive;
       clipModeActive = true;
@@ -3061,7 +3912,90 @@ function handleHistoryState(state) {
       lastQuery = nextQuery;
       if (clipSearchInput) {
         clipSearchInput.value = clipPayload.updateInput || "";
-        syncClearButton(clipSearchInput, clipSearchClear);
+        updateClipSearchClearVisibility();
+      }
+
+      const {
+        payload: restoredPayload,
+        removedUploads,
+        pendingUploads,
+      } = buildClipSearchPayloadFromState({
+        tagQuery: nextQuery,
+      });
+      if (removedUploads.length) {
+        showToast("clip-upload-removed", {
+          title: "Removed cached uploads",
+          body:
+            removedUploads.length === 1
+              ? `${removedUploads[0]} was removed because its cached data is unavailable.`
+              : `${removedUploads.length} uploads were removed because their cached data was unavailable.`,
+          variant: "error",
+          autoDismiss: 0,
+        });
+        const sanitizedSnapshot = restoredPayload.chipsSnapshot || exportClipChips();
+        const sanitizedToken =
+          ClipState.encodeQuery({
+            query: restoredPayload.query || nextQuery || "",
+            chips: sanitizedSnapshot,
+          }) || null;
+        pushHistoryState(
+          {
+            clip: sanitizedToken,
+            clipSnapshot: sanitizedSnapshot.length ? sanitizedSnapshot : null,
+            pos: sanitizedToken ? currentHistoryState.pos : 0,
+          },
+          { replace: true },
+        );
+        currentClipToken = sanitizedToken;
+        console.warn("[clip] History restore removed cached uploads", {
+          removedUploads,
+          sanitizedToken,
+          sanitizedSnapshotLength: sanitizedSnapshot.length,
+        });
+        if (!sanitizedToken) {
+          clipModeActive = false;
+          lastClipPayload = null;
+          currentClipToken = null;
+          clipOffset = 0;
+          clipTotal = 0;
+          if (clipSearchInput) {
+            clipSearchInput.value = "";
+            updateClipSearchClearVisibility();
+          }
+          pendingScrollIndex = 0;
+          scrollRestorePending = false;
+          fetchImages(true);
+          return;
+        }
+      }
+      const restoredSnapshotSize = Array.isArray(restoredPayload.chipsSnapshot)
+        ? restoredPayload.chipsSnapshot.length
+        : 0;
+      if (!restoredSnapshotSize) {
+        console.warn("[clip] History restore empty snapshot", {
+          nextClipToken,
+          query: restoredPayload.query,
+        });
+        clipModeActive = false;
+        lastClipPayload = null;
+        currentClipToken = null;
+        clipOffset = 0;
+        clipTotal = 0;
+        if (clipSearchInput) {
+          clipSearchInput.value = "";
+          updateClipSearchClearVisibility();
+        }
+        pendingScrollIndex = 0;
+        scrollRestorePending = false;
+        pushHistoryState({ clip: null, clipSnapshot: null, pos: 0 }, { replace: true });
+        fetchImages(true);
+        return;
+      }
+      if (pendingUploads || !restoredPayload) {
+        if (pendingUploads) {
+          statusEl.textContent = "Processing image…";
+        }
+        return;
       }
 
       if (targetDetail === null && detailOverlay.classList.contains("active")) {
@@ -3079,7 +4013,7 @@ function handleHistoryState(state) {
           closeDetail({ skipHistory: true });
         }
         pendingDetailId = targetDetail;
-        runClipSearch(clipPayload, { append: false, updateHistory: false });
+        runClipSearch(restoredPayload, { append: false, updateHistory: false });
         return;
       }
 
@@ -3094,7 +4028,7 @@ function handleHistoryState(state) {
       }
 
       if (!searchState.images.length && !searchState.loading) {
-        runClipSearch(clipPayload, { append: false, updateHistory: false });
+        runClipSearch(restoredPayload, { append: false, updateHistory: false });
         return;
       }
 
@@ -3105,7 +4039,7 @@ function handleHistoryState(state) {
           !searchState.done &&
           !searchState.loading
         ) {
-          const payloadForAppend = lastClipPayload || clipPayload;
+          const payloadForAppend = lastClipPayload || restoredPayload;
           runClipSearch(payloadForAppend, {
             append: !!lastClipPayload,
             updateHistory: false,
@@ -3116,6 +4050,105 @@ function handleHistoryState(state) {
       }
       return;
     }
+  } else if (snapshot && snapshot.length) {
+    clearClipChips({ silent: true });
+    rebuildClipChipsFromSnapshot(snapshot);
+    updateClipSearchClearVisibility();
+    if (clipChipState.items.length) {
+      clipModeActive = true;
+      lastQuery = nextQuery;
+      ClipState.stashSnapshotForUrl(
+        `${window.location.pathname}${window.location.search}`,
+        exportClipChips(),
+      );
+      if (clipSearchInput) {
+        clipSearchInput.value = "";
+        updateClipSearchClearVisibility();
+      }
+      const {
+        payload,
+        removedUploads,
+        pendingUploads,
+      } = buildClipSearchPayloadFromState({
+        tagQuery: nextQuery,
+      });
+      if (removedUploads.length) {
+        showToast("clip-upload-removed", {
+          title: "Removed cached uploads",
+          body:
+            removedUploads.length === 1
+              ? `${removedUploads[0]} was removed because its cached data is unavailable.`
+              : `${removedUploads.length} uploads were removed because their cached data was unavailable.`,
+          variant: "error",
+          autoDismiss: 0,
+        });
+        const sanitizedSnapshot = payload?.chipsSnapshot || exportClipChips();
+        const sanitizedToken =
+          ClipState.encodeQuery({
+            query: (payload && payload.query) || nextQuery || "",
+            chips: sanitizedSnapshot,
+          }) || null;
+        pushHistoryState(
+          {
+            clip: sanitizedToken,
+            clipSnapshot: sanitizedSnapshot.length ? sanitizedSnapshot : null,
+            pos: sanitizedToken ? currentHistoryState.pos : 0,
+          },
+          { replace: true },
+        );
+        currentClipToken = sanitizedToken;
+        console.warn("[clip] Snapshot restore removed cached uploads", {
+          removedUploads,
+          sanitizedToken,
+          sanitizedSnapshotLength: sanitizedSnapshot.length,
+        });
+        if (!sanitizedToken) {
+          clipModeActive = false;
+          lastClipPayload = null;
+          currentClipToken = null;
+          clipOffset = 0;
+          clipTotal = 0;
+          if (clipSearchInput) {
+            clipSearchInput.value = "";
+            updateClipSearchClearVisibility();
+          }
+          pendingScrollIndex = 0;
+          scrollRestorePending = false;
+          fetchImages(true);
+          return;
+        }
+      }
+      const rebuiltSnapshotSize = Array.isArray(payload && payload.chipsSnapshot)
+        ? payload.chipsSnapshot.length
+        : 0;
+      if (!rebuiltSnapshotSize) {
+        console.warn("[clip] Snapshot restore empty snapshot", {
+          query: (payload && payload.query) || nextQuery,
+        });
+        clipModeActive = false;
+        lastClipPayload = null;
+        currentClipToken = null;
+        clipOffset = 0;
+        clipTotal = 0;
+        if (clipSearchInput) {
+          clipSearchInput.value = "";
+          updateClipSearchClearVisibility();
+        }
+        pendingScrollIndex = 0;
+        scrollRestorePending = false;
+        pushHistoryState({ clip: null, clipSnapshot: null, pos: 0 }, { replace: true });
+        fetchImages(true);
+        return;
+      }
+      if (pendingUploads || !payload) {
+        if (pendingUploads) {
+          statusEl.textContent = "Processing image…";
+        }
+        return;
+      }
+      runClipSearch(payload, { append: false, updateHistory: false });
+      return;
+    }
   } else if (clipModeActive || currentClipToken) {
     clipModeActive = false;
     lastClipPayload = null;
@@ -3123,7 +4156,7 @@ function handleHistoryState(state) {
     clipOffset = 0;
     clipTotal = 0;
     if (clipSearchInput) clipSearchInput.value = "";
-    syncClearButton(clipSearchInput, clipSearchClear);
+    updateClipSearchClearVisibility();
   }
 
   if (targetDetail === null && detailOverlay.classList.contains("active")) {
@@ -3175,13 +4208,16 @@ const normalizedInitialState = {
     typeof initialState.clip === "string" && initialState.clip
       ? initialState.clip
       : null,
+  clipSnapshot: Array.isArray(initialState.clipSnapshot)
+    ? initialState.clipSnapshot
+    : null,
 };
 lastQuery = normalizedInitialState.query;
 if (searchBox.value !== lastQuery) {
   searchBox.value = lastQuery;
 }
 syncClearButton(searchBox, searchClearBtn);
-syncClearButton(clipSearchInput, clipSearchClear);
+updateClipSearchClearVisibility();
 syncRatingFiltersFromQuery();
 pendingDetailId = normalizedInitialState.detail;
 pendingScrollIndex = normalizedInitialState.pos;
@@ -3338,7 +4374,7 @@ async function pollClipStatus() {
       }
       if (clipSearchInput) clipSearchInput.disabled = true;
       if (clipSearchClear) clipSearchClear.disabled = true;
-      syncClearButton(clipSearchInput, clipSearchClear);
+      updateClipSearchClearVisibility();
       if (detailSimilarBtn) {
         detailSimilarBtn.disabled = true;
         detailSimilarBtn.dataset.id = "";
@@ -3352,7 +4388,7 @@ async function pollClipStatus() {
     if (clipSearchInput) clipSearchInput.disabled = false;
     if (clipSearchClear && !searchState.loading)
       clipSearchClear.disabled = false;
-    syncClearButton(clipSearchInput, clipSearchClear);
+    updateClipSearchClearVisibility();
     if (detailSimilarBtn && Number.isFinite(currentDetailId))
       detailSimilarBtn.disabled = false;
 
