@@ -455,11 +455,14 @@ class LocalBooruDatabase:
                 )
             else:
                 status = row["status"]
-                if (
-                    force_reset
-                    or row["model"] != model
-                    or status in {"error", "missing"}
-                ):
+                should_reset = False
+                if row["model"] != model:
+                    should_reset = True
+                elif status == "missing":
+                    should_reset = True
+                elif force_reset:
+                    should_reset = True
+                if should_reset:
                     self._connection.execute(
                         "UPDATE clip_embeddings SET model=?, status='pending', vector=NULL, error=NULL, queued_at=?, updated_at=? WHERE image_id=?",
                         (model, now, now, image_id),
@@ -498,6 +501,21 @@ class LocalBooruDatabase:
             "UPDATE clip_embeddings SET status='ready', model=?, vector=?, updated_at=? WHERE image_id=?",
             (model, vector, now, image_id),
         )
+
+    def reset_stuck_clip_jobs(self, model: Optional[str] = None) -> int:
+        now = time.time()
+        with self._connection:
+            if model is None:
+                result = self._connection.execute(
+                    "UPDATE clip_embeddings SET status='pending', updated_at=? WHERE status='processing'",
+                    (now,),
+                )
+            else:
+                result = self._connection.execute(
+                    "UPDATE clip_embeddings SET status='pending', updated_at=? WHERE status='processing' AND model=?",
+                    (now, model),
+                )
+        return int(result.rowcount or 0)
 
     def clip_progress_counts(self, model: str) -> Tuple[int, int, int, int]:
         model_value = "" if not model else str(model)
@@ -571,11 +589,11 @@ class LocalBooruDatabase:
                 status = row["status"]
                 stored_model = row["model"]
                 reset_needed = False
-                if force_reset:
+                if stored_model != model:
                     reset_needed = True
-                elif stored_model != model:
+                elif status == "missing":
                     reset_needed = True
-                elif status in {"error", "missing"}:
+                elif force_reset:
                     reset_needed = True
 
                 if reset_needed:
@@ -615,6 +633,15 @@ class LocalBooruDatabase:
                 return rows
         finally:
             conn.close()
+
+    def reset_stuck_auto_jobs(self) -> int:
+        now = time.time()
+        with self._connection:
+            result = self._connection.execute(
+                "UPDATE auto_tag_jobs SET status='pending', updated_at=? WHERE status='processing'",
+                (now,),
+            )
+        return int(result.rowcount or 0)
 
     def _execute_with_retry(
         self,

@@ -264,18 +264,22 @@ def ingest_path(
                     if changed or missing_auto_rating:
                         needs_job = True
                     elif (
-                        job_status in {None, "pending", "processing", "error"}
+                        job_status in {None, "pending", "processing"}
                         and not existing_auto_tags
                     ):
+                        needs_job = True
+                    elif job_status == "error" and changed:
                         needs_job = True
                 else:
                     if not manual_tags_present:
                         if changed:
                             needs_job = True
                         elif (
-                            job_status in {None, "pending", "processing", "error"}
+                            job_status in {None, "pending", "processing"}
                             and not existing_auto_tags
                         ):
+                            needs_job = True
+                        elif job_status == "error" and changed:
                             needs_job = True
                     elif missing_auto_rating:
                         needs_job = True
@@ -283,7 +287,6 @@ def ingest_path(
                 if needs_job:
                     force_reset = (
                         changed
-                        or job_status == "error"
                         or (
                             job_status in {"pending", "processing"}
                             and not existing_auto_tags

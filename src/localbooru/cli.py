@@ -384,6 +384,19 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     db = database.LocalBooruDatabase(config.db_path)
 
+    clip_reset = db.reset_stuck_clip_jobs(
+        config.clip_model_key if config.clip_enabled else None
+    )
+    auto_reset = db.reset_stuck_auto_jobs()
+    if clip_reset or auto_reset:
+        LOGGER.info(
+            "Reset stuck jobs",
+            extra={
+                "clip_requeued": clip_reset,
+                "auto_requeued": auto_reset,
+            },
+        )
+
     progress = ClipProgress(model_key=config.clip_model_key)
     auto_progress = AutoTagProgress()
     clip_indexer: Optional[ClipIndexer] = None
