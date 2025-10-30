@@ -454,11 +454,10 @@ main {
 .card .image-wrap {
     background: #10131c;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
     overflow: hidden;
     flex: 1 1 auto;
-    min-height: 0;
     height: auto;
     max-height: var(--card-thumb-max-height, 540px);
 }

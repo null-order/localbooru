@@ -4228,6 +4228,10 @@ function handleHistoryState(state) {
     currentClipToken = null;
     clipOffset = 0;
     clipTotal = 0;
+    clearClipChips();
+    ClipState.clearSnapshotForUrl(
+      `${window.location.pathname}${window.location.search}`,
+    );
     if (clipSearchInput) clipSearchInput.value = "";
     updateClipSearchClearVisibility();
   }
