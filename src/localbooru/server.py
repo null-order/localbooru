@@ -238,6 +238,13 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             if path in {"/app.css", "/app.js", "/clip_state.js"}:
                 self._serve_frontend_asset(path.lstrip("/"))
                 return
+            if path.startswith("/detail/"):
+                identifier = path[len("/detail/") :]
+                self._serve_detail_page(identifier)
+                return
+            if path == "/detail.js":
+                self._serve_frontend_asset("detail.js")
+                return
 
             if self.path == "/api/status/clip":
                 self._handle_clip_status()
@@ -384,6 +391,40 @@ class LocalBooruRequestHandler(BaseHTTPRequestHandler):
             content_type = f"{content_type}; charset=utf-8"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_detail_page(self, identifier: str) -> None:
+        base_dir = Path(__file__).resolve().parent / "frontend"
+        detail_path = base_dir / "detail.html"
+        if not detail_path.exists():
+            self.send_error(HTTPStatus.NOT_FOUND, "Detail page missing")
+            return
+        try:
+            image_id = int(identifier)
+        except ValueError:
+            self.send_error(HTTPStatus.NOT_FOUND, "Invalid image id")
+            return
+        db: LocalBooruDatabase = self.server.db  # type: ignore[attr-defined]
+        conn = db.new_connection()
+        try:
+            row = conn.execute(
+                "SELECT id FROM images WHERE id=?",
+                (image_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "Image not found")
+            return
+        try:
+            data = detail_path.read_bytes()
+        except OSError:
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Unable to load detail page")
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

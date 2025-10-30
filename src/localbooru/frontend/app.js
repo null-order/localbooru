@@ -2055,9 +2055,11 @@ function renderCard(item) {
       : "";
   return `
     <article class="card" data-id="${item.id}">
-        <div class="image-wrap" style="aspect-ratio:${ratio};">
-            <img src="${thumb}" data-full="${item.file_url}" loading="lazy" alt="${fallback}">
-        </div>
+        <a class="card-link" href="/detail/${item.id}" draggable="false">
+            <div class="image-wrap" style="aspect-ratio:${ratio};">
+                <img src="${thumb}" data-full="${item.file_url}" loading="lazy" alt="${fallback}">
+            </div>
+        </a>
         <div class="info">
             <div class="info-row">
                 <div class="meta">${meta}</div>
@@ -3138,6 +3140,20 @@ window.addEventListener("drop", async (event) => {
 });
 
 gridEl.addEventListener("click", (event) => {
+  const link = event.target.closest(".card-link");
+  if (link) {
+    if (
+      event.button === 0 &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.shiftKey &&
+      !event.altKey
+    ) {
+      event.preventDefault();
+    } else {
+      return;
+    }
+  }
   const card = event.target.closest(".card");
   if (!card) return;
   const id = Number(card.dataset.id);

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Image Detail • LocalBooru</title>
+        <link rel="stylesheet" href="/app.css" />
+    </head>
+    <body class="detail-page-body">
+        <header class="detail-page-header">
+            <a href="/" class="detail-back-link">← Back to gallery</a>
+            <h1 id="detail-title">Loading…</h1>
+        </header>
+        <main class="detail-page">
+            <section class="detail-media">
+                <div class="detail-image-shell">
+                    <img id="detail-image" alt="" />
+                </div>
+                <div class="detail-actions">
+                    <a id="detail-open-original" target="_blank" rel="noopener">Open original</a>
+                    <a id="detail-download" download>Download</a>
+                </div>
+            </section>
+            <section class="detail-meta-panel">
+                <div id="detail-info" class="detail-info-card detail-page-info"></div>
+                <div id="detail-rating" class="detail-rating-card"></div>
+                <div id="detail-prompts" class="detail-prompts-card">
+                    <div class="prompt-card">
+                        <h2>Positive Prompt</h2>
+                        <pre id="detail-positive">—</pre>
+                    </div>
+                    <div class="prompt-card">
+                        <h2>Negative Prompt</h2>
+                        <pre id="detail-negative">—</pre>
+                    </div>
+                </div>
+                <div id="detail-tags" class="detail-tags-card"></div>
+                <div id="detail-characters" class="detail-characters-card"></div>
+            </section>
+        </main>
+        <section class="detail-similar-section">
+            <div class="detail-similar-header">
+                <h2>Similar images</h2>
+                <button id="refresh-similar" type="button">Refresh</button>
+            </div>
+            <div id="similar-strip" class="detail-similar-strip"></div>
+            <p id="similar-status" class="detail-similar-status"></p>
+        </section>
+        <section class="detail-error" id="detail-error" hidden></section>
+        <script src="/detail.js"></script>
+    </body>
+</html>
