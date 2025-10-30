@@ -1570,6 +1570,22 @@ function buildUrlFromState(state) {
   return `${window.location.pathname}${search ? `?${search}` : ""}`;
 }
 
+function buildDetailLink(imageId) {
+  const numericId = Number(imageId);
+  if (!Number.isFinite(numericId) || numericId <= 0) {
+    return "/";
+  }
+  const baseState = currentHistoryState || {};
+  const state = {
+    query: typeof baseState.query === "string" ? baseState.query : "",
+    detail: numericId,
+    pos: 0,
+    clip: baseState.clip || null,
+  };
+  const url = buildUrlFromState(state);
+  return url || `/?detail=${encodeURIComponent(numericId)}`;
+}
+
 function pushHistoryState(state, { replace = false } = {}) {
   const queryValue = (state.query ?? currentHistoryState.query ?? "").trim();
   const detailValue =
@@ -2053,9 +2069,10 @@ function renderCard(item) {
     typeof item.score === "number"
       ? `<div class="clip-score">score ${item.score.toFixed(3)}</div>`
       : "";
+  const detailHref = buildDetailLink(item.id);
   return `
     <article class="card" data-id="${item.id}">
-        <a class="card-link" href="/detail/${item.id}" draggable="false">
+        <a class="card-link" href="${detailHref}" draggable="false">
             <div class="image-wrap" style="aspect-ratio:${ratio};">
                 <img src="${thumb}" data-full="${item.file_url}" loading="lazy" alt="${fallback}">
             </div>
