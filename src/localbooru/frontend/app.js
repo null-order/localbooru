@@ -140,6 +140,36 @@ let dragCounter = 0;
 const desktopMediaQuery = window.matchMedia("(min-width: 1101px)");
 let sidebarVisible = desktopMediaQuery.matches;
 let statusCardVisible = true;
+const STATUS_CARD_STORAGE_KEY = "localbooru.statusCard.expanded";
+const statusStorage = getLocalStorageSafe();
+if (statusStorage) {
+  const storedStatus = statusStorage.getItem(STATUS_CARD_STORAGE_KEY);
+  if (storedStatus === "collapsed") {
+    statusCardVisible = false;
+  } else if (storedStatus === "expanded") {
+    statusCardVisible = true;
+  }
+}
+
+function getLocalStorageSafe() {
+  try {
+    if (typeof window === "undefined" || !window.localStorage) return null;
+    return window.localStorage;
+  } catch (err) {
+    console.debug("localStorage unavailable", err);
+    return null;
+  }
+}
+
+function getSessionStorageSafe() {
+  try {
+    if (typeof window === "undefined" || !window.sessionStorage) return null;
+    return window.sessionStorage;
+  } catch (err) {
+    console.debug("sessionStorage unavailable", err);
+    return null;
+  }
+}
 
 updateRatingFilterCounts();
 
@@ -190,6 +220,16 @@ function updateStatusToggleButton(
   const labelEl = button.querySelector(".status-toggle-label");
   if (labelEl && label) labelEl.textContent = label;
   if (label) button.setAttribute("aria-label", label);
+}
+
+function persistStatusCardState(expanded) {
+  const storage = getLocalStorageSafe();
+  if (!storage) return;
+  try {
+    storage.setItem(STATUS_CARD_STORAGE_KEY, expanded ? "expanded" : "collapsed");
+  } catch (err) {
+    console.debug("Unable to persist status panel state", err);
+  }
 }
 
 function pushProgress(history, completed, total) {
@@ -1174,6 +1214,7 @@ function updateStatusCardHeight() {
 
 function setStatusCardExpanded(expand, { animate = true } = {}) {
   statusCardVisible = !!expand;
+  persistStatusCardState(statusCardVisible);
   if (!statusWrapperEl || !statusCardEl) return;
   const wrapper = statusWrapperEl;
   const content = statusCardEl;
@@ -2063,27 +2104,25 @@ function renderCard(item) {
   }
   const meta = metaParts.join(" • ");
   const thumb = item.thumb_url || item.file_url;
-  const ratio =
-    item.width && item.height ? `${item.width} / ${item.height}` : "2 / 3";
   const scoreLine =
     typeof item.score === "number"
       ? `<div class="clip-score">score ${item.score.toFixed(3)}</div>`
       : "";
   const detailHref = buildDetailLink(item.id);
+  const similarButton = clipEnabled
+    ? `<button class="card-action-similar" data-id="${item.id}" title="Find similar" aria-label="Find similar">≈</button>`
+    : "";
   return `
     <article class="card" data-id="${item.id}">
         <a class="card-link" href="${detailHref}" draggable="false">
-            <div class="image-wrap" style="aspect-ratio:${ratio};">
+            <div class="image-wrap">
                 <img src="${thumb}" data-full="${item.file_url}" loading="lazy" alt="${fallback}">
             </div>
         </a>
+        ${similarButton}
         <div class="info">
             <div class="info-row">
                 <div class="meta">${meta}</div>
-                <button class="similar-button" data-id="${item.id}" title="Find similar" aria-label="Find similar">
-                    <span class="icon" aria-hidden="true">≈</span>
-                    <span class="sr-only">Find similar</span>
-                </button>
             </div>
             ${scoreLine}
         </div>
@@ -2103,10 +2142,11 @@ function registerCardElement(cardEl, item) {
   cardEl.addEventListener("focus", () => {
     highlightFromCard(item.id);
   });
-  const similarBtn = cardEl.querySelector(".similar-button");
+  const similarBtn = cardEl.querySelector(".card-action-similar");
   if (similarBtn) {
     similarBtn.addEventListener("click", (event) => {
       event.stopPropagation();
+      event.preventDefault();
       const imageId = Number(similarBtn.dataset.id);
       if (!Number.isFinite(imageId)) return;
       if (!clipEnabled) return;

@@ -506,6 +506,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         scanner.start()
         if directory_watcher:
             directory_watcher.start()
+            if not directory_watcher.has_directories:
+                scanner.set_periodic_enabled(True)
 
     app_url = f"http://{config.host}:{config.port}/"
     if not config.no_ui:
