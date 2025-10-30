@@ -101,6 +101,7 @@ class DirectoryWatcher:
 
     def start(self) -> None:
         if Observer is None:
+            LOGGER.debug("watchdog Observer unavailable; skipping filesystem watcher")
             return
         handler = _WatchdogEventHandler(self._scanner)
         observer = Observer()
@@ -133,6 +134,10 @@ class DirectoryWatcher:
         self._observer = None
         self._handler = None
         self._scheduled = 0
+
+    @property
+    def has_directories(self) -> bool:
+        return self._scheduled > 0
 
 
 def create_directory_watcher(

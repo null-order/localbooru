@@ -120,6 +120,7 @@ class Scanner(threading.Thread):
         self._stop_event = threading.Event()
         self._initial_run_complete = False
         self._rescan_event = threading.Event()
+        self._periodic_enabled = True
 
     def run_once(self) -> None:
         roots_display = ", ".join(str(path) for path in self.config.roots)
@@ -143,7 +144,11 @@ class Scanner(threading.Thread):
             if not self.config.watch or self._stop_event.is_set():
                 break
             while not self._stop_event.is_set():
-                if self.config.rescan_interval and self.config.rescan_interval > 0:
+                if (
+                    self._periodic_enabled
+                    and self.config.rescan_interval
+                    and self.config.rescan_interval > 0
+                ):
                     triggered = self._rescan_event.wait(self.config.rescan_interval)
                 else:
                     triggered = self._rescan_event.wait()
@@ -152,7 +157,11 @@ class Scanner(threading.Thread):
                 if triggered:
                     self._rescan_event.clear()
                     break
-                if self.config.rescan_interval and self.config.rescan_interval > 0:
+                if (
+                    self._periodic_enabled
+                    and self.config.rescan_interval
+                    and self.config.rescan_interval > 0
+                ):
                     break
 
     def trigger_scan(self) -> None:
@@ -199,3 +208,8 @@ class Scanner(threading.Thread):
 
     def join(self, timeout: Optional[float] = None) -> None:
         super().join(timeout)
+
+    def set_periodic_enabled(self, enabled: bool) -> None:
+        self._periodic_enabled = bool(enabled)
+        if enabled:
+            self._rescan_event.set()

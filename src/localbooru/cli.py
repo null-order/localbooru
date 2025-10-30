@@ -499,6 +499,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         directory_watcher = create_directory_watcher(config, scanner)
 
     if config.watch:
+        if directory_watcher:
+            scanner.set_periodic_enabled(False)
+        else:
+            scanner.set_periodic_enabled(True)
         scanner.start()
         if directory_watcher:
             directory_watcher.start()
