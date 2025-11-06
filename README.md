@@ -1,15 +1,11 @@
 # localbooru
 
-LocalBooru is a local-first NovelAI gallery browser with CLIP-powered search, WD14 auto-tagging, and a lightweight web UI. It watches one or more directories, stores metadata in SQLite, and serves a faceted search experience entirely on your machine.
+LocalBooru is a local-first AI-gen and meme gallery browser with CLIP-powered search, WD14 auto-tagging, and a lightweight web UI. It watches one or more directories, stores metadata in SQLite, and serves a faceted search experience entirely on your machine.
+The clip search was inspired by [rclip](https://github.com/yurijmikhalevich/rclip)
+WD14 tagging is provided by [deepghs/imgutils](https://github.com/deepghs/imgutils)
+Non-novelAI AI tag extraction is done with sd-parsers so don't complain to me if your weird comfy workflow didn't parse correctly.
 
-## Highlights
-
-- Scan NovelAI PNGs plus additional reference folders into a single SQLite index.
-- Serve the bundled web UI with faceted filtering, CLIP text search, and “find similar” results.
-- Maintain CLIP embeddings and thumbnails in the background with resumable jobs.
-- Queue WD14 auto-tagging (augment or fill-missing) and expose progress via CLI or UI.
-- Run in watch/service mode with watchdog support or timer-based rescans when watchdog is unavailable.
-- Drive everything from `python -m localbooru.cli` with config files, environment overrides, or flags.
+The whole project was almost entirely vibe-coded so it may have serious bugs, and I don't suggest exposing it to the internet.
 
 ## Installation
 
@@ -20,6 +16,7 @@ Run the helper script to create a virtual environment and install LocalBooru wit
 ```bash
 scripts/setup_venv.sh
 source .venv/bin/activate
+cd /your/gallery/location
 ```
 
 Pick another location with `--venv /path/to/env`. Use `--backend cpu|cuda|rocm|mps` to select a torch stack; for GPU backends set `CUDA_VERSION` or `ROCM_VERSION` to match your wheels.
@@ -45,29 +42,16 @@ The extras can be mixed and matched:
 
 ## Quick start
 
-Inspect available flags:
+From your gallery location:
 
 ```bash
-python -m localbooru.cli --help
+localbooru --cwd
 ```
-
-Typical development loop:
-
-```bash
-# initial scan + background indexers
-python -m localbooru.cli --root /path/to/novelai --db /tmp/localbooru.db --watch
-
-# check on CLIP + auto-tag queues and rating coverage
-python -m localbooru.cli --status --db /tmp/localbooru.db
-
-# rebuild embeddings or run a headless scan
-python -m localbooru.cli --clip-only --db /tmp/localbooru.db
-python -m localbooru.cli --scan-only --db /tmp/localbooru.db --no-ui
-```
-
-Use `--extra-root` for additional libraries, `--no-ui` to stay headless, and `--webview` to force the embedded PyWebView shell. The `--service` flag enables watch mode, suppresses the browser launch, and leans on config defaults. Point `--clip-device cuda|mps|rocm` when running on GPU-enabled torch builds.
+This will scan and place the database in your current working directory.
 
 ### Configuration files & service deployments
+
+If you want to run it more seriously...
 
 Save an annotated template with:
 
@@ -77,37 +61,14 @@ python -m localbooru.cli --print-config > ~/.localbooru.toml
 
 When `~/.localbooru.toml` exists it is loaded automatically (override with `--config` or `LOCALBOORU_CONFIG`; use `--cwd` to opt out of auto-discovery). Paths inside config files resolve relative to the config file itself. Key options:
 
-- `root` or an ordered `roots = [...]` list for the primary ingest directory; `extra_roots` appends more libraries.
+- `root` for the primary library location.
+- `extra_roots` appends more libraries.
 - `db_path` and `thumb_cache` default to `${XDG_STATE_HOME:-~/.local/state}/localbooru/gallery.db` and `${XDG_CACHE_HOME:-~/.cache}/localbooru/thumbs` once a config file is in use.
 - `watch = true` enables the background rescanner; combine with the `watch` extra for native filesystem events.
 - `service = true` mirrors `--service` defaults (watch enabled, browser suppressed).
 - `clip_*` controls model choice, batch size, and device.
 - `auto_tag_*` toggles WD14 behaviour, thresholds, background processing, and batch size.
-- `image_patterns` enumerates filename globs that should be ingested (PNG, JPG, WebP, GIF, BMP, TIFF, and TGA by default).
 
-Example TOML:
-
-```toml
-root = "/mnt/library/novelai"
-extra_roots = ["/mnt/library/reference"]
-watch = true
-service = true
-
-db_path = "/var/lib/localbooru/gallery.db"
-thumb_cache = "/var/cache/localbooru/thumbs"
-
-clip_device = "cuda"
-clip_model_name = "ViT-H-14"
-clip_checkpoint = "laion2b_s32b_b79k"
-
-auto_tag_missing = true
-auto_tag_mode = "augment"
-auto_tag_background = true
-auto_tag_batch_size = 4
-auto_tag_model = "ConvNextV2"
-
-image_patterns = ["*.png", "*.jpg", "*.jpeg", "*.webp"]
-```
 
 ## Automatic tagging for unlabeled images
 
