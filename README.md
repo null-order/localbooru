@@ -1,117 +1,149 @@
 # localbooru
 
-Prototype package for the combined NovelAI gallery + CLIP search tool.
+LocalBooru is a local-first NovelAI gallery browser with CLIP-powered search, WD14 auto-tagging, and a lightweight web UI. It watches one or more directories, stores metadata in SQLite, and serves a faceted search experience entirely on your machine.
 
-> **Status:** core scaffolding in progress – filesystem ingestion, CLIP indexing queue, status API, and placeholder UI are in place. Search endpoints and the full gallery UI will land next.
+## Highlights
 
-## Usage
+- Scan NovelAI PNGs plus additional reference folders into a single SQLite index.
+- Serve the bundled web UI with faceted filtering, CLIP text search, and “find similar” results.
+- Maintain CLIP embeddings and thumbnails in the background with resumable jobs.
+- Queue WD14 auto-tagging (augment or fill-missing) and expose progress via CLI or UI.
+- Run in watch/service mode with watchdog support or timer-based rescans when watchdog is unavailable.
+- Drive everything from `python -m localbooru.cli` with config files, environment overrides, or flags.
+
+## Installation
+
+### Quick bootstrap
+
+Run the helper script to create a virtual environment and install LocalBooru with all optional extras:
+
+```bash
+scripts/setup_venv.sh
+source .venv/bin/activate
+```
+
+Pick another location with `--venv /path/to/env`. Use `--backend cpu|cuda|rocm|mps` to select a torch stack; for GPU backends set `CUDA_VERSION` or `ROCM_VERSION` to match your wheels.
+
+The script installs LocalBooru in editable mode, enables the CLIP, UI, and watch extras, and pulls in `dghs-imgutils` (GPU variant when applicable) for WD14 support.
+
+### Manual install
+
+Inside your preferred virtual environment:
+
+```bash
+pip install --upgrade pip wheel setuptools
+pip install -e .[clip,ui,watch]
+pip install dghs-imgutils  # or dghs-imgutils[gpu] for CUDA/ROCm torch wheels
+```
+
+The extras can be mixed and matched:
+
+- `clip` – PyTorch + OpenCLIP for embeddings and semantic search
+- `ui` – PyWebView for the optional desktop shell
+- `watch` – watchdog/inotify backend (falls back to timed rescans when absent)
+- `tagging` – WD14 auto-tagging helpers (installed automatically by the script above)
+
+## Quick start
+
+Inspect available flags:
 
 ```bash
 python -m localbooru.cli --help
 ```
 
-Typical workflow during development:
+Typical development loop:
 
 ```bash
-# initial scan + background services
+# initial scan + background indexers
 python -m localbooru.cli --root /path/to/novelai --db /tmp/localbooru.db --watch
 
-# query CLIP status
+# check on CLIP + auto-tag queues and rating coverage
 python -m localbooru.cli --status --db /tmp/localbooru.db
 
-# rebuild embeddings only
+# rebuild embeddings or run a headless scan
 python -m localbooru.cli --clip-only --db /tmp/localbooru.db
+python -m localbooru.cli --scan-only --db /tmp/localbooru.db --no-ui
 ```
 
-Launching without `--no-ui` now opens the gallery in your default browser. Opt back into the embedded shell with `--webview` (install via `pip install localbooru[ui]` if you want that route). CLIP indexing requires the optional extras (`pip install localbooru[clip]`).
+Use `--extra-root` for additional libraries, `--no-ui` to stay headless, and `--webview` to force the embedded PyWebView shell. The `--service` flag enables watch mode, suppresses the browser launch, and leans on config defaults. Point `--clip-device cuda|mps|rocm` when running on GPU-enabled torch builds.
 
-### Configuration files & service mode
+### Configuration files & service deployments
 
-Point the CLI at a JSON/TOML/YAML configuration file with `--config` (or the `LOCALBOORU_CONFIG` environment variable) to pin down long-lived installs. When no explicit path is provided, LocalBooru automatically looks for `~/.localbooru.toml` (unless you opt into `--cwd` legacy mode). Example TOML:
+Save an annotated template with:
+
+```bash
+python -m localbooru.cli --print-config > ~/.localbooru.toml
+```
+
+When `~/.localbooru.toml` exists it is loaded automatically (override with `--config` or `LOCALBOORU_CONFIG`; use `--cwd` to opt out of auto-discovery). Paths inside config files resolve relative to the config file itself. Key options:
+
+- `root` or an ordered `roots = [...]` list for the primary ingest directory; `extra_roots` appends more libraries.
+- `db_path` and `thumb_cache` default to `${XDG_STATE_HOME:-~/.local/state}/localbooru/gallery.db` and `${XDG_CACHE_HOME:-~/.cache}/localbooru/thumbs` once a config file is in use.
+- `watch = true` enables the background rescanner; combine with the `watch` extra for native filesystem events.
+- `service = true` mirrors `--service` defaults (watch enabled, browser suppressed).
+- `clip_*` controls model choice, batch size, and device.
+- `auto_tag_*` toggles WD14 behaviour, thresholds, background processing, and batch size.
+- `image_patterns` enumerates filename globs that should be ingested (PNG, JPG, WebP, GIF, BMP, TIFF, and TGA by default).
+
+Example TOML:
 
 ```toml
-roots = [
-  "/mnt/library/novelai",
-  "/mnt/library/reference",
-]
-watch = true      # enable background rescans
-service = true    # skip UI launch and favour watch mode defaults
+root = "/mnt/library/novelai"
+extra_roots = ["/mnt/library/reference"]
+watch = true
+service = true
+
+db_path = "/var/lib/localbooru/gallery.db"
+thumb_cache = "/var/cache/localbooru/thumbs"
+
+clip_device = "cuda"
+clip_model_name = "ViT-H-14"
+clip_checkpoint = "laion2b_s32b_b79k"
+
+auto_tag_missing = true
+auto_tag_mode = "augment"
+auto_tag_background = true
+auto_tag_batch_size = 4
+auto_tag_model = "ConvNextV2"
+
+image_patterns = ["*.png", "*.jpg", "*.jpeg", "*.webp"]
 ```
 
-The first entry in `roots` becomes the primary ingest root; the rest are treated as additional libraries. `extra_roots` can be supplied alongside the list if you prefer to keep the old split.
+## Automatic tagging for unlabeled images
 
-When a config file is present and no explicit database path is provided, LocalBooru now stores metadata under `${XDG_STATE_HOME:-~/.local/state}/localbooru/gallery.db`. Thumbnails continue to live under `${XDG_CACHE_HOME:-~/.cache}/localbooru/thumbs`.
+Install `dghs-imgutils` (or `dghs-imgutils[gpu]`) to let the WD14 queue run. Auto-tagging defaults to augmenting metadata in the background; tweak it via:
 
-Print a fully annotated template with:
+- `--no-auto-tag` (or `auto_tag_missing = false`) to disable entirely.
+- `--auto-tag-mode missing|augment` to only fill empty tags.
+- `--no-auto-tag-background` to run inline during ingestion.
+- `--auto-tag-batch-size` to control background batch size (default 4).
+- `--auto-tag-model`, `--auto-tag-general-threshold`, and `--auto-tag-character-threshold` for model selection and thresholds.
 
-```bash
-python -m localbooru.cli --print-config
-```
-
-Start a headless service with:
-
-```bash
-python -m localbooru.cli --config ~/.config/localbooru.toml --service
-```
-
-Install the optional watcher extra (`pip install localbooru[watch]`) to switch watch mode over to the `watchdog`/inotify backend. When the dependency is unavailable, the timer-based rescans from earlier releases remain in place. Use `--cwd` to stick with the original cwd-relative defaults and skip automatic config discovery.
-
-### Full environment setup
-
-LocalBooru offers the best experience when all optional extras are installed:
-
-- `[clip]` provides OpenCLIP embedding support (torch + open_clip_torch)
-- `[ui]` enables the optional desktop webview
-- `[tagging]` adds WD14 auto-tagging
-- `[watch]` swaps interval rescans for watchdog/inotify monitoring
-
-Bootstrap everything in one go with the helper script (defaults to `.venv` in the repo root):
-
-```bash
-scripts/setup_venv.sh
-source .venv/bin/activate
-python -m localbooru.cli --config ~/.localbooru.toml
-```
-
-Pass a custom path (`scripts/setup_venv.sh --venv ~/localbooru-env`) or override the interpreter (`PYTHON=python3.11 scripts/setup_venv.sh`) when needed. The script installs LocalBooru in editable mode with all extras so development and full functionality share the same environment. CPU wheels are installed by default; pick another backend with `--backend cuda|rocm|mps` (set `CUDA_VERSION` or `ROCM_VERSION` to target a specific wheel tag).
-
-The helper installs CLIP, UI, watchdog, and WD14 tagging support (using `dghs-imgutils`, or `dghs-imgutils[gpu]` for CUDA/ROCm). If you build environments manually, install the matching `dghs-imgutils` wheel yourself to enable auto-tagging.
-
-### Automatic tagging for unlabeled images
-
-Install the WD14 helpers (`pip install dghs-imgutils`, or `dghs-imgutils[gpu]` when running a CUDA/ROCm torch build) to let the bundled WD14 queue run by default. Auto-tagging now starts in augment + background mode out of the box; tweak it via:
-
-- `--no-auto-tag` to opt out entirely, or `--auto-tag-mode missing` to only fill empty metadata slots.
-- `--no-auto-tag-background` to run synchronously during ingestion (`--auto-tag-batch-size` still applies when backgrounded).
-- `--auto-tag-model`, `--auto-tag-general-threshold`, and `--auto-tag-character-threshold` to tweak model selection and confidence cutoffs.
-- The default model is SmilingWolf’s `ConvNextV2`; other installed variants (e.g. `ViT`, `MOAT`, `EVA02_Large`) can be selected with `--auto-tag-model`.
-
-Use `localbooru --status` (or the new spinning gear menu in the UI) to inspect both CLIP and auto-tag queue progress.
-
-On the detail view you'll now see status chips for CLIP/Tag state, plus auto-generated prompts (with NovelAI and Danbooru copy buttons) whenever an image only has WD14-sourced tags.
+`localbooru --status` (or the spinning gear menu in the UI) exposes CLIP and WD14 progress snapshots.
 
 ## Tag search & filtering
 
 The main search box supports tag-based queries with the following syntax:
 
-- **Basic tags**: `cat, dog, forest` - finds images containing these tags
-- **Negative tags**: `-cat, !dog` - excludes images with these tags  
-- **Tag types**: 
-  - `prompt:cat` - search in prompt tags only
-  - `char:alice` or `character:alice` - search character tags
-  - `uc:watermark` - search negative prompt tags
-  - `rating:safe` - search rating tags
+- **Basic tags**: `cat, dog, forest` – finds images containing these tags
+- **Negative tags**: `-cat, !dog` – excludes images with these tags  
+- **Tag types**:
+  - `prompt:cat` – search in prompt tags only
+  - `char:alice` or `character:alice` – search character tags
+  - `uc:watermark` – search negative prompt tags
+  - `rating:safe` – search rating tags
 - **Path search**:
-  - `path:Downloads` - find files with paths containing "Downloads"
-  - `path:birds/` - find files in any "birds" directory  
-  - `path:/home/user/Images/*` - explicit wildcards for exact patterns
-  - `path:*/temp/*` - explicit directory matching
-  - `in:Downloads` - alias for path search
-  - `-path:temp` - exclude paths containing "temp"
+  - `path:Downloads` – find files with paths containing "Downloads"
+  - `path:birds/` – find files in any "birds" directory  
+  - `path:/home/user/Images/*` – explicit wildcards for exact patterns
+  - `path:*/temp/*` – explicit directory matching
+  - `in:Downloads` – alias for path search
+  - `-path:temp` – exclude paths containing "temp"
 
 Path patterns support:
-- Auto-wildcards: `path:pol` becomes `*pol*` (contains "pol")
-- Directory search: `path:birds/` becomes `*/birds/*` (birds directory)
+
+- Auto-wildcards: `path:pol` becomes `*pol*`
+- Directory search: `path:birds/` becomes `*/birds/*`
 - Explicit wildcards: `path:*pol*` stays as-is (user controls pattern)
 - `*` matches any characters, `?` matches single characters
 - Absolute paths are normalized relative to configured roots
@@ -121,33 +153,39 @@ Multiple search terms are combined with AND logic. Separate terms with commas or
 
 ## CLIP search & similarity
 
-- Use the "CLIP search…" box in the header to run semantic text queries; active tag filters still apply so you can mix both worlds.
+- Use the "CLIP search…" box in the header to run semantic text queries; active tag filters still apply.
 - Every card (and the detail overlay) includes a **Find Similar** button that reuses stored embeddings to pull visually related images.
-- When CLIP support is disabled (`--no-clip` or missing extras) the UI controls are disabled automatically while the rest of the gallery continues to function.
+- Disable embeddings with `--no-clip` (or `clip_enabled = false`) when you want a metadata-only workflow; the UI will automatically hide CLIP controls.
+- `--clip-device` selects the torch device (e.g. `cuda`, `cuda:1`, `mps`); adjust `--clip-batch-size` when GPU memory is tight.
 
-### Required dependencies
+## Torch stacks (optional manual install)
 
-`localbooru` now expects PyTorch, OpenCLIP, and PyWebView to be present at runtime. Install **one** of the following stacks before (or after) installing the package:
+If you are not using `scripts/setup_venv.sh`, install a matching torch stack before or after installing LocalBooru:
 
-- **CPU-only** (works everywhere):
+- **CPU-only**:
   ```bash
-  export PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
-  pip install --break-system-packages torch open_clip_torch pywebview
+  pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+      torch torchvision torchaudio
   ```
-- **NVIDIA CUDA** (replace `cu121` with the desired CUDA version):
+- **NVIDIA CUDA** (`cu121` shown; replace as needed):
   ```bash
-  pip install --break-system-packages \
-      torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-  pip install --break-system-packages open_clip_torch pywebview
+  pip install --index-url https://download.pytorch.org/whl/cu121 \
+      torch torchvision torchaudio
   ```
-- **AMD ROCm** (install ROCm, then grab the matching wheels):
+- **AMD ROCm** (`rocm6.1` shown):
   ```bash
-  pip install --break-system-packages torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.1
-  pip install --break-system-packages open_clip_torch pywebview
+  pip install --index-url https://download.pytorch.org/whl/rocm6.1 \
+      torch torchvision torchaudio
   ```
 - **Apple Silicon (MPS)**:
   ```bash
-  pip install --break-system-packages torch torchvision open_clip_torch pywebview
+  pip install torch torchvision torchaudio
   ```
 
-If any of these modules are missing at startup, the CLI will fail fast with an explanatory error.
+Then add `open_clip_torch` and `pywebview` if you skipped the extras:
+
+```bash
+pip install open_clip_torch pywebview
+```
+
+Missing dependencies cause the CLI to fail fast with an explanatory error.
