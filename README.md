@@ -1,8 +1,11 @@
 # localbooru
 
 LocalBooru is a local-first AI-gen and meme gallery browser with CLIP-powered search, WD14 auto-tagging, and a lightweight web UI. It watches one or more directories, stores metadata in SQLite, and serves a faceted search experience entirely on your machine.
+
 The clip search was inspired by [rclip](https://github.com/yurijmikhalevich/rclip)
+
 WD14 tagging is provided by [deepghs/imgutils](https://github.com/deepghs/imgutils)
+
 Non-novelAI AI tag extraction is done with sd-parsers so don't complain to me if your weird comfy workflow didn't parse correctly.
 
 The whole project was almost entirely vibe-coded so it may have serious bugs, and I don't suggest exposing it to the internet.
@@ -56,7 +59,8 @@ If you want to run it more seriously...
 Save an annotated template with:
 
 ```bash
-python -m localbooru.cli --print-config > ~/.localbooru.toml
+localbooru --print-config > ~/.localbooru.toml
+
 ```
 
 When `~/.localbooru.toml` exists it is loaded automatically (override with `--config` or `LOCALBOORU_CONFIG`; use `--cwd` to opt out of auto-discovery). Paths inside config files resolve relative to the config file itself. Key options:
